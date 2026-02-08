@@ -836,11 +836,24 @@ async function extractLinksFromEmailBody(
 
           // Extract filename from Content-Disposition header
           let filename = "download.csv";
-          const cdMatch = responseHeaders.match(
-            /content-disposition:.*?filename[*]?=["']?([^;"'\r\n]+)/i,
+          // Handle RFC 5987 format: filename*=utf-8''URL_ENCODED_NAME
+          const cdRfc5987 = responseHeaders.match(
+            /content-disposition:.*?filename\*=(?:utf-8|UTF-8)?''([^\r\n;]+)/i,
           );
-          if (cdMatch) {
-            filename = cdMatch[1].trim();
+          if (cdRfc5987) {
+            try {
+              filename = decodeURIComponent(cdRfc5987[1].trim());
+            } catch {
+              filename = cdRfc5987[1].trim();
+            }
+          } else {
+            // Handle standard format: filename="name" or filename=name
+            const cdMatch = responseHeaders.match(
+              /content-disposition:.*?filename=["']?([^;"'\r\n]+)/i,
+            );
+            if (cdMatch) {
+              filename = cdMatch[1].trim();
+            }
           }
 
           if (filename === "download.csv") {
