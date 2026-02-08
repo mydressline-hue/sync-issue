@@ -3320,12 +3320,10 @@ export async function combineAndImportStagedFiles(
 
     const itemsToCreate = ruleResult.items
       .map((item) => {
-        const rawStyle = String(item.style || "")
+        // Style is already prefixed from prefixedItems step above — do NOT re-apply prefix
+        const finalStyle = String(item.style || "")
           .replace(/\s+/g, " ")
           .trim();
-        const prefix = getStylePrefix(rawStyle);
-        const combinedStyle = rawStyle ? `${prefix} ${rawStyle}` : rawStyle;
-        const finalStyle = combinedStyle.replace(/\s+/g, " ").trim();
 
         // Construct canonical SKU in Style-Color-Size lowercase format
         // Color preserves spaces (e.g., "Light Blue"), style and size use dashes
@@ -4630,13 +4628,21 @@ export function parsePRDateHeaderFormat(
     h.toLowerCase().includes("available"),
   );
 
-  // Find date columns (Excel serial numbers: 4xxxx)
+  // Find date columns - supports both Excel serial numbers (4xxxx) and date strings (M/D/YYYY)
   const dateColumns: { index: number; date: string }[] = [];
   for (let i = 0; i < headers.length; i++) {
     const h = headers[i];
     if (/^4\d{4}$/.test(h)) {
+      // Excel serial number format (e.g., 46066)
       const dateStr = excelSerialToDateStr(parseInt(h, 10));
       if (dateStr) dateColumns.push({ index: i, date: dateStr });
+    } else if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(h)) {
+      // Date string format (e.g., "2/10/2026", "12/3/2025")
+      const parsed = new Date(h);
+      if (!isNaN(parsed.getTime())) {
+        const dateStr = parsed.toISOString().split("T")[0];
+        dateColumns.push({ index: i, date: dateStr });
+      }
     }
   }
 
