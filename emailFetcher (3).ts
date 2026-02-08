@@ -19,10 +19,9 @@ function dlLog(message: string) {
 }
 import {
   processEmailAttachment,
-  combineAndImportStagedFiles,
   logSystemError,
 } from "./importUtils";
-import { triggerAutoConsolidationAfterImport } from "./routes";
+import { triggerAutoConsolidationAfterImport, performCombineImport } from "./routes";
 import { triggerShopifySyncAfterImport } from "./scheduler";
 import {
   sendEmailFetcherAlert,
@@ -438,9 +437,9 @@ export async function fetchEmailAttachments(
       // Previously this was only handled by the scheduler, leaving staged files sitting indefinitely
       dlLog(`[Email Fetcher] Post-processing: anyFileStagedGlobal=${anyFileStagedGlobal}, filesProcessed=${result.filesProcessed}`);
       if (anyFileStagedGlobal) {
-        dlLog(`[Email Fetcher] Triggering combineAndImportStagedFiles for data source ${dataSourceId}...`);
+        dlLog(`[Email Fetcher] Triggering performCombineImport for data source ${dataSourceId}...`);
         try {
-          const combineResult = await combineAndImportStagedFiles(dataSourceId);
+          const combineResult = await performCombineImport(dataSourceId);
           dlLog(`[Email Fetcher] Combine result: success=${combineResult.success}, rowCount=${combineResult.rowCount}, error=${combineResult.error || 'none'}`);
           if (combineResult.success) {
             dlLog(`[Email Fetcher] Combine successful: ${combineResult.rowCount} items imported`);
