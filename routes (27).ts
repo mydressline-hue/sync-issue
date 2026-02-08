@@ -2355,11 +2355,29 @@ export async function performCombineImport(
       if (h) headerIndexMap[h.toLowerCase().trim()] = idx;
     });
 
-    const isPivotedPreParsed =
-      cleaningConfig?.pivotedFormat?.enabled &&
+    // Detect if file was pre-parsed by a format-specific parser
+    // Pre-parsed files have standard headers: style, size, stock, color
+    // This can happen either because:
+    //   1. pivotedFormat.enabled is true (original check), OR
+    //   2. The file was parsed by a format-specific parser during upload/email staging
+    //      which produces standardized headers regardless of pivotedFormat config
+    const hasStandardHeaders =
       headerIndexMap["style"] !== undefined &&
-      headerIndexMap["size"] !== undefined;
-    console.log(`[performCombineImport] File ${fileIndex}: isPivotedPreParsed=${isPivotedPreParsed}, pivotedFormat.enabled=${cleaningConfig?.pivotedFormat?.enabled}, hasStyle=${headerIndexMap["style"] !== undefined}, hasSize=${headerIndexMap["size"] !== undefined}`);
+      headerIndexMap["size"] !== undefined &&
+      headerIndexMap["stock"] !== undefined;
+
+    // Also check if columnMapping actually matches the staged file headers
+    // If columnMapping has original file headers (e.g. "Style #") but staged file
+    // has standard headers ("style"), the mapping is mismatched
+    const columnMappingMatchesHeaders = columnMapping.style &&
+      headerIndexMap[String(columnMapping.style).toLowerCase().trim()] !== undefined;
+
+    const isPivotedPreParsed =
+      hasStandardHeaders && (
+        cleaningConfig?.pivotedFormat?.enabled ||  // Original condition
+        !columnMappingMatchesHeaders               // Staged file headers don't match columnMapping
+      );
+    console.log(`[performCombineImport] File ${fileIndex}: isPivotedPreParsed=${isPivotedPreParsed}, hasStandardHeaders=${hasStandardHeaders}, columnMappingMatchesHeaders=${columnMappingMatchesHeaders}, pivotedFormat.enabled=${cleaningConfig?.pivotedFormat?.enabled}`);
 
     const getColValue = (row: any[], colName: string) => {
       if (!colName) return null;
@@ -2385,14 +2403,20 @@ export async function performCombineImport(
       let futureDateValue: any;
 
       if (isPivotedPreParsed) {
-        sku = String(getColValue(row, "style") || "");
+        sku = String(getColValue(row, "sku") || getColValue(row, "style") || "");
         style = String(getColValue(row, "style") || "");
         size = String(getColValue(row, "size") ?? "");
         color = String(getColValue(row, "color") || "");
         stockValue = getColValue(row, "stock");
         costValue = getColValue(row, "cost");
         priceValue = getColValue(row, "price");
-        shipDateValue = getColValue(row, "shipDate");
+        shipDateValue = getColValue(row, "shipDate") || getColValue(row, "shipdate");
+        futureStockValue = getColValue(row, "futureStock") || getColValue(row, "futurestock");
+        futureDateValue = getColValue(row, "futureDate") || getColValue(row, "futuredate");
+        // Also check for incomingStock (from parsers like parseGenericPivotFormat)
+        if (!futureStockValue) {
+          futureStockValue = getColValue(row, "incomingStock") || getColValue(row, "incomingstock");
+        }
       } else {
         sku = String(getColValue(row, columnMapping.sku) || "");
         style = String(getColValue(row, columnMapping.style) || "");
