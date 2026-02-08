@@ -710,25 +710,147 @@ async function extractLinksFromEmailBody(
       `[Email Fetcher] Found ${urls.size} download URLs in email body`,
     );
 
+    const browserHeaders: Record<string, string> = {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      Accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.9",
+      "Accept-Encoding": "gzip, deflate, br",
+      Connection: "keep-alive",
+      "Upgrade-Insecure-Requests": "1",
+      "Sec-Fetch-Dest": "document",
+      "Sec-Fetch-Mode": "navigate",
+      "Sec-Fetch-Site": "none",
+      "Sec-Fetch-User": "?1",
+      "Cache-Control": "max-age=0",
+    };
+
     for (const url of urls) {
       try {
+        console.log(`[Email Fetcher] Link found: ${url}`);
         console.log(
-          `[Email Fetcher] Downloading file from: ${url.substring(0, 100)}...`,
+          `[Email Fetcher] Step 1: Initial request to capture cookies for ${url.substring(0, 80)}...`,
         );
-        const response = await fetch(url, {
-          headers: {
-            "User-Agent":
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-          },
+
+        // Step 1: Initial request to capture Akamai bot protection cookies
+        const initialResponse = await fetch(url, {
+          headers: browserHeaders,
+          redirect: "manual",
+        });
+
+        console.log(
+          `[Email Fetcher] Initial response: HTTP ${initialResponse.status} ${initialResponse.statusText}`,
+        );
+
+        // Extract cookies from Set-Cookie headers
+        let cookies = "";
+        const setCookieHeaders =
+          initialResponse.headers.getSetCookie?.() || [];
+        if (setCookieHeaders.length > 0) {
+          cookies = setCookieHeaders
+            .map((c: string) => c.split(";")[0])
+            .join("; ");
+          console.log(
+            `[Email Fetcher] Captured ${setCookieHeaders.length} cookie(s) from initial response`,
+          );
+        }
+
+        // If initial response was a redirect, capture the location too
+        const redirectLocation = initialResponse.headers.get("location");
+        const downloadUrl = redirectLocation || url;
+        if (redirectLocation) {
+          console.log(
+            `[Email Fetcher] Following redirect to: ${redirectLocation.substring(0, 80)}...`,
+          );
+        }
+
+        // Step 2: Download with captured cookies and full browser headers
+        console.log(`[Email Fetcher] Step 2: Downloading with cookies...`);
+        const downloadHeaders: Record<string, string> = {
+          ...browserHeaders,
+          Referer: new URL(url).origin + "/",
+        };
+        if (cookies) {
+          downloadHeaders["Cookie"] = cookies;
+        }
+
+        let response = await fetch(downloadUrl, {
+          headers: downloadHeaders,
           redirect: "follow",
         });
 
+        console.log(
+          `[Email Fetcher] Download response: HTTP ${response.status} ${response.statusText}`,
+        );
+
+        // Step 3: If still blocked (405/403), retry with accumulated cookies
+        if (!response.ok && (response.status === 405 || response.status === 403)) {
+          console.log(
+            `[Email Fetcher] Step 3: Got ${response.status}, retrying with updated cookies...`,
+          );
+          const retrySetCookies =
+            response.headers.getSetCookie?.() || [];
+          if (retrySetCookies.length > 0) {
+            const newCookies = retrySetCookies
+              .map((c: string) => c.split(";")[0])
+              .join("; ");
+            cookies = cookies ? `${cookies}; ${newCookies}` : newCookies;
+            console.log(
+              `[Email Fetcher] Accumulated ${retrySetCookies.length} additional cookie(s)`,
+            );
+          }
+
+          const retryHeaders: Record<string, string> = {
+            ...browserHeaders,
+            Referer: new URL(url).origin + "/",
+          };
+          if (cookies) {
+            retryHeaders["Cookie"] = cookies;
+          }
+
+          response = await fetch(downloadUrl, {
+            headers: retryHeaders,
+            redirect: "follow",
+          });
+
+          console.log(
+            `[Email Fetcher] Retry response: HTTP ${response.status} ${response.statusText}`,
+          );
+        }
+
         if (!response.ok) {
-          console.error(`[Email Fetcher] HTTP ${response.status} for ${url}`);
+          console.error(
+            `[Email Fetcher] FAILED to download: HTTP ${response.status} ${response.statusText} for ${url}`,
+          );
+          const respHeaders: Record<string, string> = {};
+          response.headers.forEach((value, key) => {
+            respHeaders[key] = value;
+          });
+          console.error(
+            `[Email Fetcher] Response headers:`,
+            JSON.stringify(respHeaders, null, 2),
+          );
           continue;
         }
 
         const buffer = Buffer.from(await response.arrayBuffer());
+
+        // Check if response is actually HTML (bot challenge page) instead of file data
+        const contentType = response.headers.get("content-type") || "";
+        if (
+          contentType.includes("text/html") &&
+          buffer.length < 50000 &&
+          buffer.toString("utf-8").includes("<html")
+        ) {
+          console.error(
+            `[Email Fetcher] BLOCKED: Response is an HTML page (likely bot challenge), not a file. URL: ${url}`,
+          );
+          console.error(
+            `[Email Fetcher] Content-Type: ${contentType}, Size: ${buffer.length} bytes`,
+          );
+          continue;
+        }
 
         let filename = "download.csv";
         const contentDisposition = response.headers.get("content-disposition");
@@ -754,13 +876,14 @@ async function extractLinksFromEmailBody(
         }
 
         console.log(
-          `[Email Fetcher] Downloaded: ${filename} (${buffer.length} bytes)`,
+          `[Email Fetcher] SUCCESS: Downloaded ${filename} (${buffer.length} bytes) from ${url.substring(0, 80)}`,
         );
         files.push({ filename, content: buffer });
       } catch (dlErr: any) {
         console.error(
-          `[Email Fetcher] Failed to download from ${url}: ${dlErr.message}`,
+          `[Email Fetcher] EXCEPTION downloading from ${url}: ${dlErr.message}`,
         );
+        console.error(`[Email Fetcher] Stack trace:`, dlErr.stack);
       }
     }
   } catch (err) {
