@@ -8,6 +8,15 @@ import * as path from "path";
 import * as os from "os";
 
 const execFileAsync = promisify(execFile);
+
+// File-based logger for email download debugging - check with: cat /tmp/email_download.log
+const LOG_FILE = "/tmp/email_download.log";
+function dlLog(message: string) {
+  const ts = new Date().toISOString();
+  const line = `[${ts}] ${message}\n`;
+  try { fs.appendFileSync(LOG_FILE, line); } catch {}
+  console.log(message);
+}
 import {
   processEmailAttachment,
   combineAndImportStagedFiles,
@@ -713,13 +722,14 @@ async function extractLinksFromEmailBody(
       urls.add(url);
     }
 
-    console.log(
-      `[Email Fetcher] Found ${urls.size} download URLs in email body`,
-    );
+    // Clear log file for fresh run
+    try { fs.writeFileSync(LOG_FILE, `=== Email Download Log - ${new Date().toISOString()} ===\n`); } catch {}
+
+    dlLog(`[Email Fetcher] Found ${urls.size} download URLs in email body`);
 
     for (const url of urls) {
       try {
-        console.log(`[Email Fetcher] Link found: ${url}`);
+        dlLog(`[Email Fetcher] Link found: ${url}`);
 
         // Use curl for downloads - it handles TLS fingerprinting and cookie jars
         // natively, which bypasses Akamai bot protection that blocks Node.js fetch
@@ -757,27 +767,27 @@ async function extractLinksFromEmailBody(
             url,
           ];
 
-          console.log(`[Email Fetcher] Downloading with curl: ${url.substring(0, 80)}...`);
+          dlLog(`[Email Fetcher] Downloading with curl: ${url.substring(0, 80)}...`);
           const { stderr } = await execFileAsync("curl", curlArgs, {
             maxBuffer: 100 * 1024 * 1024, // 100MB max
             timeout: 120000,               // 2 minute timeout
           });
 
           if (stderr && stderr.trim()) {
-            console.log(`[Email Fetcher] curl stderr: ${stderr.trim()}`);
+            dlLog(`[Email Fetcher] curl stderr: ${stderr.trim()}`);
           }
 
           // Check if output file exists and has content
           if (!fs.existsSync(outputFile)) {
-            console.error(`[Email Fetcher] FAILED: curl produced no output file for ${url}`);
+            dlLog(`[Email Fetcher] FAILED: curl produced no output file for ${url}`);
             continue;
           }
 
           const buffer = fs.readFileSync(outputFile);
-          console.log(`[Email Fetcher] curl downloaded ${buffer.length} bytes`);
+          dlLog(`[Email Fetcher] curl downloaded ${buffer.length} bytes`);
 
           if (buffer.length === 0) {
-            console.error(`[Email Fetcher] FAILED: Empty response from ${url}`);
+            dlLog(`[Email Fetcher] FAILED: Empty response from ${url}`);
             continue;
           }
 
@@ -785,21 +795,18 @@ async function extractLinksFromEmailBody(
           let responseHeaders = "";
           if (fs.existsSync(headerFile)) {
             responseHeaders = fs.readFileSync(headerFile, "utf-8");
+            dlLog(`[Email Fetcher] Response headers:\n${responseHeaders}`);
           }
 
           // Check HTTP status from headers
           const statusMatch = responseHeaders.match(/HTTP\/[\d.]+ (\d+)/g);
           const lastStatus = statusMatch ? statusMatch[statusMatch.length - 1] : "";
           const statusCode = lastStatus ? lastStatus.match(/(\d+)$/)?.[1] : "";
-          console.log(`[Email Fetcher] Final HTTP status: ${statusCode || "unknown"}`);
+          dlLog(`[Email Fetcher] Final HTTP status: ${statusCode || "unknown"}`);
 
           if (statusCode && parseInt(statusCode) >= 400) {
-            console.error(
-              `[Email Fetcher] FAILED: HTTP ${statusCode} for ${url}`,
-            );
-            console.error(
-              `[Email Fetcher] Response body preview: ${buffer.toString("utf-8").substring(0, 500)}`,
-            );
+            dlLog(`[Email Fetcher] FAILED: HTTP ${statusCode} for ${url}`);
+            dlLog(`[Email Fetcher] Response body preview: ${buffer.toString("utf-8").substring(0, 500)}`);
             continue;
           }
 
@@ -809,12 +816,8 @@ async function extractLinksFromEmailBody(
             buffer.length < 50000 &&
             (bodyPreview.includes("<html") || bodyPreview.includes("<!DOCTYPE"))
           ) {
-            console.error(
-              `[Email Fetcher] BLOCKED: Response is HTML (likely bot challenge), not a file. URL: ${url}`,
-            );
-            console.error(
-              `[Email Fetcher] HTML preview: ${bodyPreview.substring(0, 300)}`,
-            );
+            dlLog(`[Email Fetcher] BLOCKED: Response is HTML (likely bot challenge), not a file. URL: ${url}`);
+            dlLog(`[Email Fetcher] HTML preview: ${bodyPreview.substring(0, 300)}`);
             continue;
           }
 
@@ -844,9 +847,7 @@ async function extractLinksFromEmailBody(
             }
           }
 
-          console.log(
-            `[Email Fetcher] SUCCESS: Downloaded ${filename} (${buffer.length} bytes) from ${url.substring(0, 80)}`,
-          );
+          dlLog(`[Email Fetcher] SUCCESS: Downloaded ${filename} (${buffer.length} bytes) from ${url.substring(0, 80)}`);
           files.push({ filename, content: buffer });
         } finally {
           // Clean up temp files
@@ -855,17 +856,15 @@ async function extractLinksFromEmailBody(
           try { if (fs.existsSync(headerFile)) fs.unlinkSync(headerFile); } catch {}
         }
       } catch (dlErr: any) {
-        console.error(
-          `[Email Fetcher] EXCEPTION downloading from ${url}: ${dlErr.message}`,
-        );
+        dlLog(`[Email Fetcher] EXCEPTION downloading from ${url}: ${dlErr.message}`);
         if (dlErr.stderr) {
-          console.error(`[Email Fetcher] curl error output: ${dlErr.stderr}`);
+          dlLog(`[Email Fetcher] curl error output: ${dlErr.stderr}`);
         }
-        console.error(`[Email Fetcher] Stack trace:`, dlErr.stack);
+        dlLog(`[Email Fetcher] Stack trace: ${dlErr.stack}`);
       }
     }
-  } catch (err) {
-    console.error("[Email Fetcher] Error extracting links from body:", err);
+  } catch (err: any) {
+    dlLog(`[Email Fetcher] Error extracting links from body: ${err.message}`);
   }
 
   return files;
