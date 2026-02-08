@@ -3033,7 +3033,8 @@ export async function combineAndImportStagedFiles(
       const headers = file.headers as string[];
 
       if (!previewData || !headers) continue;
-      allRows.push(...previewData);
+      // Use concat instead of push(...) to avoid stack overflow with large arrays
+      allRows = allRows.concat(previewData);
 
       // Build header index map for this file
       const headerIndexMap: Record<string, number> = {};
@@ -3210,7 +3211,8 @@ export async function combineAndImportStagedFiles(
         })
         .filter((item: any) => item && item.sku);
 
-      allItems.push(...items);
+      // Use concat instead of push(...) to avoid stack overflow with large arrays
+      allItems = allItems.concat(items);
     }
 
     const cleanResult = await cleanInventoryData(allItems, dataSource.name);
