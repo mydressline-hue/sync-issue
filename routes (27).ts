@@ -2466,8 +2466,8 @@ export async function performCombineImport(
         size = rawSize;
       }
 
-      // Handle combined variant code format
-      if (cleaningConfig.combinedVariantColumn) {
+      // Handle combined variant code format (skip for pre-parsed files)
+      if (cleaningConfig.combinedVariantColumn && !isPivotedPreParsed) {
         const combined = String(getColValue(row, cleaningConfig.combinedVariantColumn) || "");
         const delimiter = cleaningConfig.combinedVariantDelimiter || "-";
         const parts = combined.split(delimiter);
@@ -2488,21 +2488,23 @@ export async function performCombineImport(
         }
       }
 
-      // Apply cleaning to style column only
-      if (style && cleaningConfig.trimWhitespace) {
-        style = style.trim();
-      }
-      if (style && cleaningConfig.removeLetters) {
-        style = style.replace(/[a-zA-Z]/g, "");
-      }
-      if (style && cleaningConfig.removeNumbers) {
-        style = style.replace(/[0-9]/g, "");
-      }
-      if (style && cleaningConfig.removeSpecialChars) {
-        style = style.replace(/[^a-zA-Z0-9\s]/g, "");
-      }
-      if (style && cleaningConfig.findText && cleaningConfig.replaceText !== undefined) {
-        style = style.split(cleaningConfig.findText).join(cleaningConfig.replaceText);
+      // Apply cleaning to style column only (skip for pre-parsed files — parser already cleaned)
+      if (!isPivotedPreParsed) {
+        if (style && cleaningConfig.trimWhitespace) {
+          style = style.trim();
+        }
+        if (style && cleaningConfig.removeLetters) {
+          style = style.replace(/[a-zA-Z]/g, "");
+        }
+        if (style && cleaningConfig.removeNumbers) {
+          style = style.replace(/[0-9]/g, "");
+        }
+        if (style && cleaningConfig.removeSpecialChars) {
+          style = style.replace(/[^a-zA-Z0-9\s]/g, "");
+        }
+        if (style && cleaningConfig.findText && cleaningConfig.replaceText !== undefined) {
+          style = style.split(cleaningConfig.findText).join(cleaningConfig.replaceText);
+        }
       }
 
       if (!sku && style) {
@@ -2581,12 +2583,27 @@ export async function performCombineImport(
       }
 
       const prefix = style ? getStylePrefix(style) : dataSource.name;
+      const prefixedStyle = style ? `${prefix} ${style}` : style;
+
+      // Rebuild SKU from prefixed style + color + size (matching manual upload handler)
+      // This ensures consistent format: "Portia & Scarlett MP25001-BL-06" → "Portia-&-Scarlett-MP25001-BL-06-Default-06"
+      const toTitleCase = (str: string): string =>
+        str.toLowerCase().replace(/(?:^|[\s\-\/&])\S/g, (a) => a.toUpperCase());
+      const normalizedColor = color ? toTitleCase(color) : color;
+      const rebuiltSku =
+        prefixedStyle && normalizedColor && size != null && size !== ""
+          ? `${prefixedStyle}-${normalizedColor}-${size}`
+              .replace(/\//g, "-")
+              .replace(/\s+/g, "-")
+              .replace(/-+/g, "-")
+          : (sku || "").replace(/\//g, "-").replace(/-+/g, "-");
+
       allItems.push({
         dataSourceId,
         saleOwnsStyle: isSaleFile,
         fileId: file.id,
-        sku,
-        style: style ? `${prefix} ${style}` : style,
+        sku: rebuiltSku,
+        style: prefixedStyle,
         size,
         color,
         stock,
