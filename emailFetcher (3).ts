@@ -319,12 +319,14 @@ export async function fetchEmailAttachments(
               }
 
               try {
+                dlLog(`[Email Fetcher] Calling processEmailAttachment for ${attachment.filename} (${attachment.content.length} bytes, forceStage=${forceStageMultiple})`);
                 const importResult = await processEmailAttachment(
                   dataSourceId,
                   attachment.content,
                   attachment.filename,
                   forceStageMultiple, // FIX: Force staging when multiple files detected
                 );
+                dlLog(`[Email Fetcher] processEmailAttachment result: success=${importResult.success}, staged=${importResult.staged}, rowCount=${importResult.rowCount}, error=${importResult.error || 'none'}`);
 
                 await storage.createEmailFetchLog({
                   dataSourceId,
@@ -434,41 +436,31 @@ export async function fetchEmailAttachments(
 
       // FIX: After all emails are processed, trigger combine for multi-file sources
       // Previously this was only handled by the scheduler, leaving staged files sitting indefinitely
+      dlLog(`[Email Fetcher] Post-processing: anyFileStagedGlobal=${anyFileStagedGlobal}, anyFileImported=${anyFileImported}`);
       if (anyFileStagedGlobal) {
-        console.log(
-          `[Email Fetcher] All emails processed, triggering combine for data source ${dataSourceId}...`,
-        );
+        dlLog(`[Email Fetcher] Triggering combineAndImportStagedFiles for data source ${dataSourceId}...`);
         try {
           const combineResult = await combineAndImportStagedFiles(dataSourceId);
+          dlLog(`[Email Fetcher] Combine result: success=${combineResult.success}, rowCount=${combineResult.rowCount}, error=${combineResult.error || 'none'}`);
           if (combineResult.success) {
-            console.log(
-              `[Email Fetcher] Combine successful: ${combineResult.rowCount} items imported`,
-            );
+            dlLog(`[Email Fetcher] Combine successful: ${combineResult.rowCount} items imported`);
             // Trigger consolidation and sync after successful combine
             try {
               await triggerAutoConsolidationAfterImport(dataSourceId);
             } catch (err: any) {
-              console.error(
-                "Error in auto-consolidation after combine:",
-                err.message,
-              );
+              dlLog(`[Email Fetcher] Error in auto-consolidation after combine: ${err.message}`);
             }
             triggerShopifySyncAfterImport(dataSourceId).catch((err: any) => {
-              console.error(
-                "Error triggering Shopify sync after combine:",
-                err.message,
-              );
+              dlLog(`[Email Fetcher] Error triggering Shopify sync after combine: ${err.message}`);
             });
           } else {
-            console.error(
-              `[Email Fetcher] Combine failed: ${combineResult.error}`,
-            );
+            dlLog(`[Email Fetcher] Combine FAILED: ${combineResult.error}`);
           }
         } catch (combineErr: any) {
-          console.error(
-            `[Email Fetcher] Error in combine step: ${combineErr.message}`,
-          );
+          dlLog(`[Email Fetcher] EXCEPTION in combine step: ${combineErr.message}\n${combineErr.stack}`);
         }
+      } else {
+        dlLog(`[Email Fetcher] No files staged - skipping combine step`);
       }
 
       // Send email notification ONCE after all emails are processed
