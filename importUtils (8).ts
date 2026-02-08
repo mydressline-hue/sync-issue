@@ -1,4 +1,5 @@
 import * as XLSX from "xlsx";
+import * as fs from "fs";
 import { storage } from "./storage";
 import Anthropic from "@anthropic-ai/sdk";
 import { validateImportFile, logValidationFailure } from "./importValidator";
@@ -3025,12 +3026,20 @@ export async function combineAndImportStagedFiles(
     const columnMapping = (dataSource.columnMapping || {}) as any;
     const cleaningConfig = (dataSource.cleaningConfig || {}) as any;
 
+    const cLog = (msg: string) => {
+      const line = `[${new Date().toISOString()}] ${msg}\n`;
+      try { fs.appendFileSync("/tmp/email_download.log", line); } catch {}
+    };
+    cLog(`[Combine] columnMapping: ${JSON.stringify(columnMapping)}`);
+    cLog(`[Combine] Staged files to process: ${filesToProcess.length}`);
+
     let allItems: any[] = [];
     let allRows: any[][] = []; // Accumulate all rows for applyImportRules rawDataRows parameter
 
     for (const file of filesToProcess) {
       const previewData = file.previewData as any[];
       const headers = file.headers as string[];
+      cLog(`[Combine] File: ${(file as any).originalFilename || 'unknown'}, headers: ${JSON.stringify(headers?.slice(0, 10))}, rows: ${previewData?.length || 0}`);
 
       if (!previewData || !headers) continue;
       // Use concat instead of push(...) to avoid stack overflow with large arrays
@@ -3211,11 +3220,22 @@ export async function combineAndImportStagedFiles(
         })
         .filter((item: any) => item && item.sku);
 
+      cLog(`[Combine] Items extracted from file: ${items.length} (before: allItems had ${allItems.length})`);
+      if (items.length === 0 && previewData?.length > 0) {
+        // Log a sample row to debug why no items passed the filter
+        const sampleRow = previewData[0];
+        cLog(`[Combine] Sample row[0]: ${JSON.stringify(sampleRow)}`);
+        cLog(`[Combine] SKU mapping: columnMapping.sku="${columnMapping?.sku}", style="${columnMapping?.style}"`);
+      } else if (items.length > 0) {
+        cLog(`[Combine] Sample item[0]: ${JSON.stringify(items[0])}`);
+      }
       // Use concat instead of push(...) to avoid stack overflow with large arrays
       allItems = allItems.concat(items);
     }
 
+    cLog(`[Combine] Total allItems after all files: ${allItems.length}`);
     const cleanResult = await cleanInventoryData(allItems, dataSource.name);
+    cLog(`[Combine] After cleanInventoryData: ${cleanResult.items?.length || 0} items`);
 
     // CRITICAL FIX: Apply prefix to style BEFORE applyVariantRules
     // This ensures prefix override patterns in sizeLimitConfig work correctly
