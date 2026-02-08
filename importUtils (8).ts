@@ -3108,8 +3108,18 @@ export async function processEmailAttachment(
 export async function combineAndImportStagedFiles(
   dataSourceId: string,
 ): Promise<{ success: boolean; rowCount: number; error?: string }> {
-  // Signal that import has started (for sync coordination)
+  // ========================================================================
+  // UNIFIED COMBINE & IMPORT — uses the EXACT same logic as the manual
+  // combine-import route in routes.ts (POST /api/data-sources/:id/combine-import)
+  // This ensures email import and manual import produce identical results.
+  // ========================================================================
   startImport(dataSourceId);
+
+  const cLog = (msg: string) => {
+    const line = `[${new Date().toISOString()}] ${msg}\n`;
+    try { fs.appendFileSync("/tmp/email_download.log", line); } catch {}
+    console.log(msg);
+  };
 
   try {
     const dataSource = await storage.getDataSource(dataSourceId);
@@ -3120,213 +3130,15 @@ export async function combineAndImportStagedFiles(
 
     const stagedFiles = await storage.getStagedFiles(dataSourceId);
     if (stagedFiles.length === 0) {
-      // Not a failure, just nothing to do - still signal completion
       completeImport(dataSourceId, 0);
-      return {
-        success: false,
-        rowCount: 0,
-        error: "No staged files to combine",
-      };
+      return { success: false, rowCount: 0, error: "No staged files to combine" };
     }
 
-    // FIX: Process ALL staged files regardless of date
-    // Previously only today's files were processed, orphaning files from previous days
-    const filesToProcess = stagedFiles;
+    cLog(`[Combine] Starting combine for "${dataSource.name}" with ${stagedFiles.length} staged files`);
 
-    let columnMapping = (dataSource.columnMapping || {}) as any;
-    const cleaningConfig = (dataSource.cleaningConfig || {}) as any;
-
-    const cLog = (msg: string) => {
-      const line = `[${new Date().toISOString()}] ${msg}\n`;
-      try { fs.appendFileSync("/tmp/email_download.log", line); } catch {}
-    };
-
-    // Auto-detect standard column names when columnMapping is empty
-    // This handles pre-parsed files (e.g. from pivot parser) where headers
-    // already contain standard names like sku, style, color, size, stock
-    if (!columnMapping || Object.keys(columnMapping).length === 0) {
-      const firstFile = filesToProcess[0];
-      const firstHeaders = (firstFile?.headers as string[]) || [];
-      const lowerHeaders = firstHeaders.map((h: string) => (h || "").toLowerCase().trim());
-
-      const standardFields: Record<string, string[]> = {
-        sku: ["sku"],
-        style: ["style"],
-        color: ["color"],
-        size: ["size"],
-        stock: ["stock", "quantity", "qty"],
-        cost: ["cost"],
-        price: ["price"],
-        shipDate: ["shipdate", "ship date", "ship_date"],
-        futureStock: ["futurestock", "future stock", "future_stock"],
-        futureDate: ["futuredate", "future date", "future_date"],
-        incomingStock: ["incomingstock", "incoming stock", "incoming_stock"],
-        discontinued: ["discontinued"],
-      };
-
-      const autoMapping: any = {};
-      for (const [field, aliases] of Object.entries(standardFields)) {
-        for (const alias of aliases) {
-          const idx = lowerHeaders.indexOf(alias);
-          if (idx >= 0) {
-            autoMapping[field] = firstHeaders[idx];
-            break;
-          }
-        }
-      }
-
-      if (Object.keys(autoMapping).length > 0) {
-        columnMapping = autoMapping;
-        cLog(`[Combine] columnMapping was empty - auto-detected from headers: ${JSON.stringify(columnMapping)}`);
-      }
-    }
-
-    cLog(`[Combine] columnMapping: ${JSON.stringify(columnMapping)}`);
-    cLog(`[Combine] Staged files to process: ${filesToProcess.length}`);
-
-    let allItems: any[] = [];
-
-    for (const file of filesToProcess) {
-      const previewData = file.previewData as any[];
-      const headers = file.headers as string[];
-      cLog(`[Combine] File: ${(file as any).originalFilename || 'unknown'}, headers: ${JSON.stringify(headers?.slice(0, 10))}, rows: ${previewData?.length || 0}`);
-
-      if (!previewData || !headers) continue;
-
-      const items = previewData
-        .map((row: any[]) => {
-          const getColValue = (colName: string) => {
-            if (!colName) return null;
-            const colIndex = headers.findIndex(
-              (h) => h && h.toString().toLowerCase() === colName.toLowerCase(),
-            );
-            return colIndex >= 0 ? row[colIndex] : null;
-          };
-
-          // === Core fields (always extracted) ===
-          let sku = getColValue(columnMapping?.sku || "") || "";
-          let style = getColValue(columnMapping?.style || "") || "";
-          // FIX: Use ?? instead of || to preserve numeric 0 (valid size like "0" or "00")
-          let size = getColValue(columnMapping?.size || "") ?? "";
-          let color = getColValue(columnMapping?.color || "") || "";
-          let stockValue = getColValue(columnMapping?.stock || "");
-
-          style = applyCleaningToValue(
-            String(style || ""),
-            cleaningConfig,
-            "style",
-          );
-          // Normalize SKU - convert slashes to hyphens for Shopify compatibility
-          sku = String(sku || "")
-            .trim()
-            .replace(/\//g, "-")
-            .replace(/-+/g, "-");
-          // FIX: Use ?? to preserve numeric 0 (valid size)
-          size = String(size ?? "").trim();
-          color = String(color || "").trim();
-
-          if (!sku && style) sku = style;
-
-          let stock = 0;
-          if (typeof stockValue === "number") {
-            stock = stockValue;
-          } else if (typeof stockValue === "string") {
-            const parsed = Math.max(
-              0,
-              Math.round(parseFloat(stockValue.replace(/[^0-9.-]/g, ""))),
-            );
-            stock = isNaN(parsed) ? 0 : parsed;
-          }
-
-          // === Extended fields (only extracted when present in headers) ===
-          // This matches single-file import behavior so combine doesn't lose data
-          const result: any = { sku, style, size, color, stock };
-
-          // Cost/price
-          if (columnMapping?.cost) {
-            const v = getColValue(columnMapping.cost);
-            if (v != null) result.cost = String(v).replace(/[$,]/g, "").trim() || null;
-          }
-          if (columnMapping?.price) {
-            const v = getColValue(columnMapping.price);
-            if (v != null) result.price = String(v).replace(/[$,]/g, "").trim() || null;
-          }
-
-          // Ship date
-          if (columnMapping?.shipDate) {
-            const v = getColValue(columnMapping.shipDate);
-            if (v != null && v !== "") result.shipDate = String(v).trim() || null;
-          }
-
-          // Incoming stock (from PR date headers parser)
-          if (columnMapping?.incomingStock) {
-            const v = getColValue(columnMapping.incomingStock);
-            if (v != null) {
-              const parsed = parseFloat(String(v).replace(/[^0-9.-]/g, ""));
-              if (!isNaN(parsed)) result.incomingStock = parsed;
-            }
-          }
-
-          // Future stock/date
-          if (columnMapping?.futureStock) {
-            const v = getColValue(columnMapping.futureStock);
-            if (v != null && v !== "") {
-              const parsed = parseFloat(String(v).replace(/[^0-9.-]/g, ""));
-              if (!isNaN(parsed)) result.futureStock = parsed;
-            }
-          }
-          if (columnMapping?.futureDate) {
-            const v = getColValue(columnMapping.futureDate);
-            if (v != null && v !== "") result.futureDate = String(v).trim();
-          }
-
-          // Discontinued flag
-          if (columnMapping?.discontinued) {
-            const v = getColValue(columnMapping.discontinued);
-            if (v != null) {
-              const lower = String(v).toLowerCase().trim();
-              result.discontinued = lower === "yes" || lower === "y" || lower === "true" || lower === "1" || lower === "discontinued";
-            }
-          }
-
-          // Derive hasFutureStock/preserveZeroStock flags (matching single-file behavior)
-          if (result.shipDate || result.futureDate || result.incomingStock > 0) {
-            result.hasFutureStock = true;
-            if (stock === 0) result.preserveZeroStock = true;
-          }
-
-          return result;
-        })
-        .filter((item: any) => item && item.sku);
-
-      cLog(`[Combine] Items extracted from file: ${items.length} (before: allItems had ${allItems.length})`);
-      if (items.length === 0 && previewData?.length > 0) {
-        const sampleRow = previewData[0];
-        cLog(`[Combine] ZERO ITEMS - Sample row[0]: ${JSON.stringify(sampleRow)}`);
-        cLog(`[Combine] ZERO ITEMS - columnMapping: ${JSON.stringify(columnMapping)}`);
-        cLog(`[Combine] ZERO ITEMS - headers: ${JSON.stringify(headers)}`);
-      } else if (items.length > 0) {
-        cLog(`[Combine] Sample item[0]: ${JSON.stringify(items[0])}`);
-        // Log if extended fields are present
-        const sample = items[0];
-        const extFields = ['cost','price','shipDate','incomingStock','hasFutureStock','preserveZeroStock','discontinued'].filter(f => sample[f] != null);
-        if (extFields.length > 0) {
-          cLog(`[Combine] Extended fields detected: ${extFields.join(', ')}`);
-        } else {
-          cLog(`[Combine] WARNING: No extended fields found in items (only basic 5 fields)`);
-        }
-      }
-      // Use concat instead of push(...) to avoid stack overflow with large arrays
-      allItems = allItems.concat(items);
-    }
-
-    cLog(`[Combine] Total allItems after all files: ${allItems.length}`);
-    const cleanResult = await cleanInventoryData(allItems, dataSource.name);
-    cLog(`[Combine] After cleanInventoryData: ${cleanResult.items?.length || 0} items`);
-
-    // CRITICAL FIX: Apply prefix to style BEFORE applyVariantRules
-    // This ensures prefix override patterns in sizeLimitConfig work correctly
-    const getStylePrefixForCombine = (style: string): string => {
+    // ---- Helper: get prefix for a style (matches routes.ts exactly) ----
+    const getStylePrefix = (style: string): string => {
+      const cleaningConfig = dataSource.cleaningConfig as any;
       if (
         cleaningConfig?.useCustomPrefixes &&
         cleaningConfig?.stylePrefixRules?.length > 0
@@ -3356,43 +3168,340 @@ export async function combineAndImportStagedFiles(
       return prefix;
     };
 
-    // Apply prefix to items before import rules
-    const prefixedItems = cleanResult.items.map((item: any) => {
-      const prefix = item.style
-        ? getStylePrefixForCombine(item.style)
-        : dataSource.name;
-      const prefixedStyle = item.style ? `${prefix} ${item.style}` : item.style;
-      return {
-        ...item,
-        style: prefixedStyle,
-      };
-    });
+    // ---- Combine items from all staged files (SAME as routes.ts) ----
+    const allItems: any[] = [];
+    let allRows: any[][] = [];
+    const columnMapping = (dataSource.columnMapping as any) || {};
+    const cleaningConfig = (dataSource.cleaningConfig as any) || {};
 
-    // Apply configurable import rules (pricing, discontinued, required fields, etc.)
+    // Check if this is a Jovani sale file that needs stateful parsing
+    const isJovaniSaleFormat = cleaningConfig?.pivotedFormat?.vendor === "jovani";
+    const isSaleFile = (dataSource as any).sourceType === "sales";
+
+    cLog(`[Combine] columnMapping: ${JSON.stringify(columnMapping)}`);
+    cLog(`[Combine] isJovaniSaleFormat: ${isJovaniSaleFormat}, isSaleFile: ${isSaleFile}`);
+
+    for (const file of stagedFiles) {
+      const rows = (file.previewData as any[]) || [];
+      const headers = (file.headers as string[]) || [];
+      // Accumulate all rows for applyImportRules rawDataRows parameter
+      // Use concat to avoid stack overflow with large arrays
+      allRows = allRows.concat(rows);
+
+      cLog(`[Combine] File: ${(file as any).fileName || 'unknown'}, headers: ${JSON.stringify(headers?.slice(0, 10))}, rows: ${rows.length}`);
+
+      // Build header index map for this file
+      const headerIndexMap: Record<string, number> = {};
+      headers.forEach((h: string, idx: number) => {
+        if (h) headerIndexMap[h.toLowerCase().trim()] = idx;
+      });
+
+      // Check if this is a pre-parsed pivoted format file
+      const isPivotedPreParsed =
+        cleaningConfig?.pivotedFormat?.enabled &&
+        headerIndexMap["style"] !== undefined &&
+        headerIndexMap["size"] !== undefined;
+
+      // Helper to get column value by mapped column name
+      const getColValue = (row: any[], colName: string) => {
+        if (!colName) return null;
+        const idx = headerIndexMap[colName.toLowerCase().trim()];
+        return idx !== undefined ? row[idx] : null;
+      };
+
+      // For Jovani sale files, use stateful parsing to track current style
+      let jovaniCurrentStyle = "";
+      const isPurelyNumeric = (val: string) => /^\d+$/.test(val);
+
+      for (const row of rows) {
+        if (!Array.isArray(row)) continue;
+
+        let sku: string;
+        let style: string;
+        let size: string;
+        let color: string;
+        let stockValue: any;
+        let costValue: any;
+        let priceValue: any;
+        let shipDateValue: any;
+        let futureStockValue: any;
+        let futureDateValue: any;
+
+        if (isPivotedPreParsed) {
+          sku = String(getColValue(row, "style") || "");
+          style = String(getColValue(row, "style") || "");
+          size = String(getColValue(row, "size") ?? "");
+          color = String(getColValue(row, "color") || "");
+          stockValue = getColValue(row, "stock");
+          costValue = getColValue(row, "cost");
+          priceValue = getColValue(row, "price");
+          shipDateValue = getColValue(row, "shipDate");
+        } else {
+          sku = String(getColValue(row, columnMapping.sku) || "");
+          style = String(getColValue(row, columnMapping.style) || "");
+          size = String(getColValue(row, columnMapping.size) ?? "");
+          color = String(getColValue(row, columnMapping.color) || "");
+          stockValue = getColValue(row, columnMapping.stock);
+          costValue = getColValue(row, columnMapping.cost);
+          priceValue = getColValue(row, columnMapping.price);
+          shipDateValue = getColValue(row, columnMapping.shipDate);
+          futureStockValue = getColValue(row, columnMapping.futureStock);
+          futureDateValue = getColValue(row, columnMapping.futureDate);
+        }
+
+        // Jovani sale file stateful parsing (matches routes.ts exactly)
+        if (isJovaniSaleFormat && !isPivotedPreParsed) {
+          const rawStyle = String(getColValue(row, columnMapping.style) || "").trim();
+          const rawColor = String(getColValue(row, columnMapping.color) || "").trim();
+          const rawSize = String(getColValue(row, columnMapping.size) ?? "").trim();
+
+          const isStyleNumber = (val: string) => /^#?\d{4,6}$/.test(val);
+          const isValidColor = (val: string) => /[a-zA-Z]{2,}/.test(val);
+
+          const isStyleRowNormal = rawStyle && !rawColor;
+          const isStyleRowMisaligned = !rawStyle && rawColor && isPurelyNumeric(rawColor);
+          const isStyleRowNumeric = rawStyle && isStyleNumber(rawStyle);
+
+          if (isStyleRowNormal || isStyleRowNumeric) {
+            jovaniCurrentStyle = rawStyle;
+            continue;
+          }
+          if (isStyleRowMisaligned) {
+            jovaniCurrentStyle = rawColor;
+            continue;
+          }
+          if (!jovaniCurrentStyle) continue;
+          if (!rawColor || isPurelyNumeric(rawColor) || !isValidColor(rawColor)) continue;
+
+          style = jovaniCurrentStyle;
+          color = rawColor;
+          size = rawSize;
+        }
+
+        // Handle combined variant code format (e.g., "AMARNI-BLK-0" = style-color-size)
+        if (cleaningConfig.combinedVariantColumn) {
+          const combined = String(getColValue(row, cleaningConfig.combinedVariantColumn) || "");
+          const delimiter = cleaningConfig.combinedVariantDelimiter || "-";
+          const parts = combined.split(delimiter);
+
+          if (parts.length >= 3) {
+            size = parts[parts.length - 1] || "";
+            color = parts[parts.length - 2] || "";
+            style = parts.slice(0, parts.length - 2).join(delimiter) || "";
+          } else if (parts.length === 2) {
+            style = parts[0] || "";
+            size = parts[1] || "";
+          } else if (parts.length === 1) {
+            style = parts[0] || "";
+          }
+
+          if (size && /^0+[1-9]\d*$/.test(size)) {
+            size = size.replace(/^0+/, "");
+          }
+        }
+
+        // Apply cleaning to style column (matches routes.ts exactly)
+        if (style && cleaningConfig.trimWhitespace) {
+          style = style.trim();
+        }
+        if (style && cleaningConfig.removeLetters) {
+          style = style.replace(/[a-zA-Z]/g, "");
+        }
+        if (style && cleaningConfig.removeNumbers) {
+          style = style.replace(/[0-9]/g, "");
+        }
+        if (style && cleaningConfig.removeSpecialChars) {
+          style = style.replace(/[^a-zA-Z0-9\s]/g, "");
+        }
+        if (style && cleaningConfig.findText && cleaningConfig.replaceText !== undefined) {
+          style = style.split(cleaningConfig.findText).join(cleaningConfig.replaceText);
+        }
+
+        // If no SKU mapped, use style as SKU
+        if (!sku && style) {
+          sku = style;
+        }
+
+        // Convert stock to number (matches routes.ts: includes yes/no conversion)
+        let stock = 0;
+        if (typeof stockValue === "number") {
+          stock = stockValue;
+        } else if (typeof stockValue === "string") {
+          if (cleaningConfig.convertYesNo) {
+            const lower = stockValue.toLowerCase().trim();
+            if (lower === "yes" || lower === "y" || lower === "true") {
+              stock = cleaningConfig.yesValue ?? 1;
+            } else if (lower === "no" || lower === "n" || lower === "false") {
+              stock = cleaningConfig.noValue ?? 0;
+            } else {
+              const parsed = Math.max(0, Math.round(parseFloat(stockValue.replace(/[^0-9.-]/g, ""))));
+              stock = isNaN(parsed) ? 0 : parsed;
+            }
+          } else {
+            const parsed = Math.max(0, Math.round(parseFloat(stockValue.replace(/[^0-9.-]/g, ""))));
+            stock = isNaN(parsed) ? 0 : parsed;
+          }
+        }
+
+        // Clean cost/price values
+        const cost = costValue ? String(costValue).replace(/[$,]/g, "").trim() : null;
+        const price = priceValue ? String(priceValue).replace(/[$,]/g, "").trim() : null;
+
+        // Parse ship date (matches routes.ts: handles Excel serial numbers and date strings)
+        let shipDate: string | null = null;
+        if (shipDateValue) {
+          if (typeof shipDateValue === "number") {
+            const excelEpoch = new Date(1899, 11, 30);
+            const date = new Date(excelEpoch.getTime() + shipDateValue * 24 * 60 * 60 * 1000);
+            shipDate = date.toISOString().split("T")[0];
+          } else {
+            const dateStr = String(shipDateValue).trim();
+            if (dateStr) {
+              const parsedDate = new Date(dateStr);
+              if (!isNaN(parsedDate.getTime())) {
+                shipDate = parsedDate.toISOString().split("T")[0];
+              } else {
+                shipDate = null;
+              }
+            }
+          }
+        }
+
+        // Parse future stock value
+        let futureStock: number | null = null;
+        if (futureStockValue !== undefined && futureStockValue !== null && futureStockValue !== "") {
+          const parsed = parseFloat(String(futureStockValue).replace(/[^0-9.-]/g, ""));
+          if (!isNaN(parsed)) futureStock = parsed;
+        }
+
+        // Parse future date value
+        let futureDate: string | null = null;
+        if (futureDateValue) {
+          if (typeof futureDateValue === "number") {
+            const excelEpoch = new Date(1899, 11, 30);
+            const date = new Date(excelEpoch.getTime() + futureDateValue * 24 * 60 * 60 * 1000);
+            futureDate = date.toISOString().split("T")[0];
+          } else {
+            const dateStr = String(futureDateValue).trim();
+            if (dateStr) {
+              const parsedDate = new Date(dateStr);
+              if (!isNaN(parsedDate.getTime())) {
+                futureDate = parsedDate.toISOString().split("T")[0];
+              } else {
+                futureDate = null;
+              }
+            }
+          }
+        }
+
+        // Apply prefix and push item (matches routes.ts exactly)
+        const prefix = style ? getStylePrefix(style) : dataSource.name;
+        allItems.push({
+          dataSourceId,
+          saleOwnsStyle: isSaleFile,
+          fileId: file.id,
+          sku,
+          style: style ? `${prefix} ${style}` : style,
+          size,
+          color,
+          stock,
+          cost,
+          price,
+          shipDate,
+          futureStock,
+          futureDate,
+          hasFutureStock: shipDate || futureDate ? true : false,
+          preserveZeroStock: (shipDate || futureDate) && stock === 0 ? true : false,
+          rawData: { row, headers },
+        });
+      }
+
+      cLog(`[Combine] File processed: ${allItems.length} total items so far`);
+    }
+
+    cLog(`[Combine] Total allItems after all files: ${allItems.length}`);
+    if (allItems.length > 0) {
+      cLog(`[Combine] allItems[0]: ${JSON.stringify(allItems[0])}`);
+    }
+
+    // ---- Check update strategy ----
+    const updateStrategy = (dataSource as any).updateStrategy || "full_sync";
+
+    // ---- FUTURE STOCK ZEROING (matches routes.ts exactly) ----
+    const uniqueCombineDates = new Set(
+      allItems.map((i: any) => i.shipDate).filter(Boolean),
+    );
+
+    if (uniqueCombineDates.size > 1) {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const offset = (dataSource as any).stockInfoConfig?.dateOffsetDays ?? 0;
+      const cutoffDate = new Date(today);
+      cutoffDate.setDate(cutoffDate.getDate() - offset);
+
+      let futureZeroed = 0;
+      let withinOffsetKept = 0;
+
+      for (const item of allItems) {
+        if (!item.shipDate || item.stock <= 0) continue;
+
+        let parsedDate: Date | null = null;
+        const dateStr = String(item.shipDate).trim();
+        const mdyMatch = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+        if (mdyMatch) {
+          parsedDate = new Date(parseInt(mdyMatch[3]), parseInt(mdyMatch[1]) - 1, parseInt(mdyMatch[2]));
+        } else {
+          parsedDate = new Date(dateStr);
+        }
+
+        if (parsedDate && !isNaN(parsedDate.getTime()) && parsedDate > cutoffDate) {
+          (item as any).incomingStock = item.stock;
+          item.stock = 0;
+          item.hasFutureStock = true;
+          item.preserveZeroStock = true;
+          futureZeroed++;
+        } else if (parsedDate && !isNaN(parsedDate.getTime()) && parsedDate > today && parsedDate <= cutoffDate) {
+          withinOffsetKept++;
+        }
+      }
+
+      if (futureZeroed > 0 || withinOffsetKept > 0) {
+        cLog(`[Combine] Future stock zeroing: ${futureZeroed} items zeroed, ${withinOffsetKept} kept (within ${offset}-day offset). ${uniqueCombineDates.size} unique dates.`);
+      }
+    } else if (uniqueCombineDates.size === 1) {
+      cLog(`[Combine] Single date detected (${[...uniqueCombineDates][0]}) — snapshot mode, preserving stock`);
+    }
+
+    // ---- Step 1: Clean data ----
+    const cleanResult = await cleanInventoryData(allItems, dataSource.name);
+    cLog(`[Combine] After cleanInventoryData: ${cleanResult.items?.length || 0} items`);
+
+    // ---- Step 2: Apply import rules (matches routes.ts: includes allRows + stockValueConfig + complexStockConfig) ----
     const importRulesConfig = {
-      discontinuedRules: (dataSource as any).discontinuedRules,
+      discontinuedRules:
+        (dataSource as any).discontinuedConfig ||
+        (dataSource as any).discontinuedRules,
       salePriceConfig: (dataSource as any).salePriceConfig,
       priceFloorCeiling: (dataSource as any).priceFloorCeiling,
       minStockThreshold: (dataSource as any).minStockThreshold,
-      requiredFieldsConfig: (dataSource as any).requiredFieldsConfig,
       stockThresholdEnabled: (dataSource as any).stockThresholdEnabled,
+      requiredFieldsConfig: (dataSource as any).requiredFieldsConfig,
       dateFormatConfig: (dataSource as any).dateFormatConfig,
       valueReplacementRules: (dataSource as any).valueReplacementRules,
       regularPriceConfig: (dataSource as any).regularPriceConfig,
       cleaningConfig: dataSource.cleaningConfig,
       futureStockConfig: (dataSource as any).futureStockConfig,
+      stockValueConfig: (dataSource as any).stockValueConfig,
+      complexStockConfig: (dataSource as any).complexStockConfig,
     };
-    cLog(`[Combine] prefixedItems count: ${prefixedItems.length}`);
-    if (prefixedItems.length > 0) {
-      cLog(`[Combine] prefixedItems[0]: ${JSON.stringify(prefixedItems[0])}`);
-    }
-
     const importRulesResult = await applyImportRules(
-      prefixedItems, // Use prefixed items
+      cleanResult.items,
       importRulesConfig,
+      allRows,
     );
     cLog(`[Combine] After applyImportRules: ${importRulesResult.items?.length || 0} items`);
 
+    // ---- Step 3: Apply variant rules ----
     const ruleResult = await applyVariantRules(
       importRulesResult.items,
       dataSourceId,
@@ -3402,219 +3511,224 @@ export async function combineAndImportStagedFiles(
       cLog(`[Combine] variantRules sample[0]: ${JSON.stringify(ruleResult.items[0])}`);
     }
 
-    // Check update strategy
-    const updateStrategy = (dataSource as any).updateStrategy || "full_sync";
+    // ---- Step 4: Price-based size expansion (matches routes.ts exactly) ----
+    let priceBasedExpansionCount = 0;
+    let itemsAfterExpansion = ruleResult.items;
+    const priceBasedExpansionConfig = (dataSource as any).priceBasedExpansionConfig;
 
-    // Helper function to get prefix for a style (for final SKU construction)
-    // For sale files, strips "Sale" or "Sales" from the prefix to match regular file naming
-    const getStylePrefix = (style: string): string => {
-      if (
-        cleaningConfig?.useCustomPrefixes &&
-        cleaningConfig?.stylePrefixRules?.length > 0
-      ) {
-        for (const rule of cleaningConfig.stylePrefixRules) {
-          if (
-            rule.pattern &&
-            rule.prefix &&
-            style.toLowerCase().startsWith(rule.pattern.toLowerCase())
-          ) {
-            return rule.prefix;
+    if (
+      priceBasedExpansionConfig?.enabled &&
+      (priceBasedExpansionConfig.tiers?.length > 0 ||
+        (priceBasedExpansionConfig.defaultExpandDown ?? 0) > 0 ||
+        (priceBasedExpansionConfig.defaultExpandUp ?? 0) > 0)
+    ) {
+      const shopifyStoreId = (dataSource as any).shopifyStoreId;
+      if (shopifyStoreId) {
+        cLog(`[Combine] Applying price-based size expansion for "${dataSource.name}"`);
+        try {
+          const cacheVariants = await storage.getVariantCacheProductStyles(shopifyStoreId);
+          const stylePriceMap = buildStylePriceMapFromCache(cacheVariants);
+          cLog(`[Combine] Built style price map with ${stylePriceMap.size} styles`);
+
+          const expansionResult = applyPriceBasedExpansion(
+            ruleResult.items,
+            priceBasedExpansionConfig,
+            stylePriceMap,
+            (dataSource as any).sizeLimitConfig,
+          );
+          itemsAfterExpansion = expansionResult.items;
+          priceBasedExpansionCount = expansionResult.addedCount;
+
+          if (priceBasedExpansionCount > 0) {
+            cLog(`[Combine] Price-based expansion added ${priceBasedExpansionCount} size variants`);
           }
+        } catch (expansionError: any) {
+          cLog(`[Combine] Price-based expansion error: ${expansionError.message}`);
         }
       }
-
-      let prefix = dataSource.name;
-
-      // For sale files, strip "Sale" or "Sales" suffix from the prefix
-      // This ensures "Jovani Sale 12345" becomes "Jovani 12345" (matching the regular file)
-      if ((dataSource as any).sourceType === "sales") {
-        const saleMatch = prefix.match(/^(.+?)\s*(Sale|Sales)$/i);
-        if (saleMatch) {
-          prefix = saleMatch[1].trim();
-        }
-      }
-
-      return prefix;
-    };
-
-    // Helper to normalize style/size for SKU: trim, collapse whitespace, replace spaces/slashes with dashes
-    const normalizeForSku = (val: string): string => {
-      return val
-        .trim()
-        .replace(/\s+/g, " ")
-        .replace(/ /g, "-")
-        .replace(/\//g, "-")
-        .replace(/-+/g, "-");
-    };
-
-    // Helper for color in SKU: convert spaces and slashes to hyphens for Shopify compliance
-    const normalizeColorForSku = (val: string): string => {
-      return val
-        .trim()
-        .replace(/\s+/g, "-")
-        .replace(/\//g, "-")
-        .replace(/-+/g, "-");
-    };
-
-    const itemsToCreate = ruleResult.items
-      .map((item) => {
-        // Style is already prefixed from prefixedItems step above — do NOT re-apply prefix
-        const finalStyle = String(item.style || "")
-          .replace(/\s+/g, " ")
-          .trim();
-
-        // Construct canonical SKU in Style-Color-Size lowercase format
-        // Color preserves spaces (e.g., "Light Blue"), style and size use dashes
-        const styleWithDashes = normalizeForSku(finalStyle);
-        const colorPart = normalizeColorForSku(String(item.color || ""));
-        const sizePart = normalizeForSku(String(item.size || ""));
-
-        // Build canonical SKU if all parts present, otherwise use style as fallback
-        let canonicalSku = "";
-        if (styleWithDashes && colorPart && sizePart) {
-          canonicalSku =
-            `${styleWithDashes}-${colorPart}-${sizePart}`.toLowerCase();
-        } else if (styleWithDashes) {
-          // Fallback: use style-based SKU for incomplete items (preserves data)
-          canonicalSku = styleWithDashes.toLowerCase();
-        }
-
-        return {
-          dataSourceId,
-          sku: canonicalSku || null,
-          style: finalStyle,
-          size: item.size,
-          color: item.color,
-          stock: item.stock,
-          cost: item.cost,
-          price: item.price,
-          // Pass through extended fields to match single-file import behavior
-          shipDate: item.shipDate,
-          hasFutureStock: item.hasFutureStock || false,
-          preserveZeroStock: item.preserveZeroStock || false,
-          discontinued: item.discontinued || false,
-          incomingStock: item.incomingStock,
-        };
-      })
-      .filter((item) => item.sku); // Filter out items without any SKU
-
-    cLog(`[Combine] itemsToCreate count: ${itemsToCreate.length}`);
-    if (itemsToCreate.length > 0) {
-      cLog(`[Combine] itemsToCreate[0]: ${JSON.stringify(itemsToCreate[0])}`);
-      const withFuture = itemsToCreate.filter((i: any) => i.hasFutureStock);
-      const withShipDate = itemsToCreate.filter((i: any) => i.shipDate);
-      const withDiscontinued = itemsToCreate.filter((i: any) => i.discontinued);
-      cLog(`[Combine] Extended field stats: hasFutureStock=${withFuture.length}, shipDate=${withShipDate.length}, discontinued=${withDiscontinued.length}`);
-    } else {
-      cLog(`[Combine] WARNING: itemsToCreate is EMPTY after SKU filter`);
     }
 
-    // Handle discontinued styles based on source type
-    const isSaleFile = (dataSource as any).sourceType === "sales";
+    // ---- Step 5: Handle discontinued styles (matches routes.ts exactly) ----
     const linkedSaleDataSourceId = (dataSource as any).assignedSaleDataSourceId;
-    let itemsToImport = itemsToCreate;
+    let discontinuedStylesFiltered = 0;
+    let discontinuedItemsRemoved = 0;
+    let saleStylesRegistered = 0;
+    let itemsToImport = itemsAfterExpansion;
 
-    if (isSaleFile) {
-      // Sale file: Register all unique styles in discontinued_styles table
-      const regResult = await registerSaleFileStyles(
-        dataSourceId,
-        itemsToCreate,
-      );
-      console.log(
-        `[Combine Staged] Sale file "${dataSource.name}" - registered ${regResult.total} styles (${regResult.added} new, ${regResult.updated} updated)`,
-      );
-    } else if (linkedSaleDataSourceId) {
-      // Regular file with linked sale file: Filter out discontinued styles
-      console.log(
-        `[Combine Staged] Regular file "${dataSource.name}" - checking for discontinued styles from sale file`,
-      );
+    if (!isSaleFile && linkedSaleDataSourceId) {
+      cLog(`[Combine] Regular file "${dataSource.name}" - checking for discontinued styles from sale file`);
 
-      // First, remove any existing inventory items that have discontinued styles
-      const discontinuedItemsRemoved = await removeDiscontinuedInventoryItems(
+      discontinuedItemsRemoved = await removeDiscontinuedInventoryItems(
         dataSourceId,
         linkedSaleDataSourceId,
       );
       if (discontinuedItemsRemoved > 0) {
-        console.log(
-          `[Combine Staged] Removed ${discontinuedItemsRemoved} existing inventory items with discontinued styles`,
-        );
+        cLog(`[Combine] Removed ${discontinuedItemsRemoved} existing inventory items with discontinued styles`);
       }
 
-      // Then, filter out items from this import that have discontinued styles
       const filterResult = await filterDiscontinuedStyles(
         dataSourceId,
-        itemsToCreate,
+        itemsAfterExpansion,
         linkedSaleDataSourceId,
       );
       itemsToImport = filterResult.items;
+      discontinuedStylesFiltered = filterResult.removedCount;
 
-      if (filterResult.removedCount > 0) {
-        console.log(
-          `[Combine Staged] Filtered out ${filterResult.removedCount} items with ${filterResult.discontinuedStyles.length} discontinued styles: ${filterResult.discontinuedStyles.slice(0, 3).join(", ")}${filterResult.discontinuedStyles.length > 3 ? "..." : ""}`,
-        );
+      if (discontinuedStylesFiltered > 0) {
+        cLog(`[Combine] Filtered out ${discontinuedStylesFiltered} items with discontinued styles`);
       }
     }
 
+    // ---- Step 6: Shopify price lookup for compare-at (sale files, matches routes.ts exactly) ----
+    const shopifyStoreIdForCompareAt = (dataSource as any).shopifyStoreId;
+    const salesConfig = (dataSource as any).salesConfig || {
+      priceMultiplier: 2,
+      useCompareAtPrice: true,
+    };
+    const priceMultiplierForSale = salesConfig.priceMultiplier || 2;
+    const useCompareAtPrice = salesConfig.useCompareAtPrice ?? true;
+
+    let shopifyPriceMap = new Map<string, string>();
+    let shopifyPricesLoaded = 0;
+
+    if (shopifyStoreIdForCompareAt && useCompareAtPrice && isSaleFile) {
+      try {
+        const skus = itemsToImport
+          .map((item: any) => item.sku)
+          .filter((sku: string | null) => sku && sku.trim());
+
+        if (skus.length > 0) {
+          cLog(`[Combine] Looking up Shopify prices for ${skus.length} SKUs (sale file compare-at)...`);
+          const cachedVariants = await storage.getVariantCacheBySKUs(
+            shopifyStoreIdForCompareAt,
+            skus,
+          );
+
+          for (const v of cachedVariants) {
+            if (v.sku && v.price) {
+              const normalizedSku = v.sku.trim().toUpperCase();
+              shopifyPriceMap.set(normalizedSku, v.price);
+            }
+          }
+          shopifyPricesLoaded = shopifyPriceMap.size;
+          cLog(`[Combine] Loaded ${shopifyPricesLoaded} Shopify prices for compare-at`);
+        }
+      } catch (err: any) {
+        cLog(`[Combine] Error loading Shopify prices for compare-at: ${err.message}`);
+      }
+    }
+
+    // Apply sale pricing
+    if (isSaleFile && shopifyPricesLoaded > 0) {
+      itemsToImport = itemsToImport.map((item: any) => {
+        const basePrice = parseFloat(item.price || "0");
+        let finalPrice = item.price;
+        let cost = item.cost || null;
+
+        if (basePrice > 0) {
+          finalPrice = (basePrice * priceMultiplierForSale).toFixed(2);
+          if (item.sku && useCompareAtPrice) {
+            const normalizedSku = item.sku.trim().toUpperCase();
+            const shopifyPrice = shopifyPriceMap.get(normalizedSku);
+            if (shopifyPrice) {
+              cost = shopifyPrice;
+            }
+          }
+        }
+
+        return { ...item, price: finalPrice, cost: cost };
+      });
+      cLog(`[Combine] Applied sale pricing: ${priceMultiplierForSale}x multiplier, ${shopifyPricesLoaded} compare-at prices set`);
+    }
+
+    // ---- Step 7: Calculate stockInfo (matches routes.ts exactly) ----
+    const stockInfoRule = await getStockInfoRuleForEmail(dataSource, storage);
+    if (stockInfoRule) {
+      cLog(`[Combine] Calculating stockInfo for ${itemsToImport.length} items using rule: "${stockInfoRule.name}"`);
+      itemsToImport = itemsToImport.map((item: any) => ({
+        ...item,
+        stockInfo: calculateItemStockInfo(item, stockInfoRule),
+      }));
+    }
+
+    cLog(`[Combine] Final itemsToImport count: ${itemsToImport.length}`);
+    if (itemsToImport.length > 0) {
+      cLog(`[Combine] itemsToImport[0]: ${JSON.stringify(itemsToImport[0])}`);
+    }
+
+    // ---- Step 8: Save to database (matches routes.ts exactly) ----
+    let importedCount = 0;
+
     if (itemsToImport.length > 0) {
       if (updateStrategy === "full_sync") {
-        // Full Sync: Atomic delete + insert to guarantee no stale items remain
-        console.log(
-          `[Combine Staged Full Sync] ${dataSource.name}: Starting atomic replace with ${itemsToImport.length} items`,
-        );
+        cLog(`[Combine Full Sync] ${dataSource.name}: Starting atomic replace with ${itemsToImport.length} items`);
         const result = await storage.atomicReplaceInventoryItems(
           dataSourceId,
           itemsToImport as any,
         );
-        console.log(
-          `[Combine Staged Full Sync] ${dataSource.name}: Atomic replace complete - deleted ${result.deleted}, created ${result.created} items`,
-        );
+        importedCount = result.created;
+        cLog(`[Combine Full Sync] ${dataSource.name}: Atomic replace complete - deleted ${result.deleted}, created ${result.created} items`);
       } else {
-        // Replace (Create & Update): Only add/update items, keep items not in file
-        console.log(
-          `[Combine Staged Upsert] ${dataSource.name}: Upserting ${itemsToImport.length} items (existing items NOT deleted)`,
-        );
-        // Reset sale flags for regular inventory sources to clear stale consolidation state
+        cLog(`[Combine Upsert] ${dataSource.name}: Upserting ${itemsToImport.length} items`);
         const isRegularInventory = (dataSource as any).sourceType !== "sales";
-        await storage.upsertInventoryItems(itemsToImport as any, dataSourceId, {
-          resetSaleFlags: isRegularInventory,
-        });
+        const result = await storage.upsertInventoryItems(
+          itemsToImport as any,
+          dataSourceId,
+          { resetSaleFlags: isRegularInventory },
+        );
+        importedCount = result.added + result.updated;
+        cLog(`[Combine Upsert] ${dataSource.name}: Added ${result.added}, updated ${result.updated} items`);
       }
-    } else {
-      // No valid items to import - don't delete existing data, just log warning
-      console.warn(
-        `[Combine Staged] No valid items to import for data source ${dataSourceId} - keeping existing data`,
-      );
+    } else if (updateStrategy === "full_sync") {
+      // SAFETY NET: Block empty combine from deleting all data (matches routes.ts)
+      const existingCount = await storage.getInventoryItemCountByDataSource(dataSourceId);
+      if (existingCount > 0) {
+        cLog(`[Combine] SAFETY BLOCK: 0 items but ${existingCount} existing — NOT deleting`);
+        // Don't delete, just warn
+      } else {
+        cLog(`[Combine] No items to import and no existing items — nothing to do`);
+      }
     }
 
-    for (const file of filesToProcess) {
+    // Register sale file styles AFTER import (matches routes.ts order)
+    if (isSaleFile && itemsToImport.length > 0) {
+      try {
+        const styleResult = await registerSaleFileStyles(dataSourceId, itemsToImport);
+        saleStylesRegistered = styleResult.total;
+        cLog(`[Combine] Registered ${saleStylesRegistered} styles from sale file "${dataSource.name}"`);
+      } catch (err: any) {
+        cLog(`[Combine] Error registering sale file styles: ${err.message}`);
+      }
+    }
+
+    // Mark all staged files as imported
+    for (const file of stagedFiles) {
       await storage.updateFileStatus(file.id, "imported");
     }
 
-    // Signal import completion (for sync coordination)
-    completeImport(dataSourceId, itemsToCreate.length);
-    return { success: true, rowCount: itemsToCreate.length };
+    // Update data source last sync time
+    await storage.updateDataSource(dataSourceId, {});
+
+    // Signal import completion
+    completeImport(dataSourceId, importedCount);
+    cLog(`[Combine] Complete: ${importedCount} items imported for "${dataSource.name}"`);
+    return { success: true, rowCount: importedCount };
   } catch (err: any) {
     console.error("Error combining staged files:", err);
+    cLog(`[Combine] ERROR: ${err.message}\n${err.stack}`);
 
-    // FIX: Clean up staged files on failure so they don't become permanent orphans
     try {
       const staleFiles = await storage.getStagedFiles(dataSourceId);
       for (const file of staleFiles) {
         await storage.updateFileStatus(file.id, "error");
       }
       if (staleFiles.length > 0) {
-        console.log(
-          `[Combine] Marked ${staleFiles.length} staged files as error after combine failure`,
-        );
+        cLog(`[Combine] Marked ${staleFiles.length} staged files as error after combine failure`);
       }
     } catch (cleanupErr: any) {
-      console.error(
-        "[Combine] Error cleaning up staged files:",
-        cleanupErr.message,
-      );
+      cLog(`[Combine] Error cleaning up staged files: ${cleanupErr.message}`);
     }
 
-    // Signal import failure (for sync coordination)
     failImport(dataSourceId, err.message);
     return { success: false, rowCount: 0, error: err.message };
   }
