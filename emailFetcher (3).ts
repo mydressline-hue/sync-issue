@@ -319,12 +319,14 @@ export async function fetchEmailAttachments(
               }
 
               try {
+                dlLog(`[Email Fetcher] Calling processEmailAttachment for ${attachment.filename} (${attachment.content.length} bytes, forceStage=${forceStageMultiple})`);
                 const importResult = await processEmailAttachment(
                   dataSourceId,
                   attachment.content,
                   attachment.filename,
                   forceStageMultiple, // FIX: Force staging when multiple files detected
                 );
+                dlLog(`[Email Fetcher] processEmailAttachment result: success=${importResult.success}, staged=${importResult.staged}, rowCount=${importResult.rowCount}, error=${importResult.error || 'none'}`);
 
                 await storage.createEmailFetchLog({
                   dataSourceId,
@@ -434,41 +436,31 @@ export async function fetchEmailAttachments(
 
       // FIX: After all emails are processed, trigger combine for multi-file sources
       // Previously this was only handled by the scheduler, leaving staged files sitting indefinitely
+      dlLog(`[Email Fetcher] Post-processing: anyFileStagedGlobal=${anyFileStagedGlobal}, filesProcessed=${result.filesProcessed}`);
       if (anyFileStagedGlobal) {
-        console.log(
-          `[Email Fetcher] All emails processed, triggering combine for data source ${dataSourceId}...`,
-        );
+        dlLog(`[Email Fetcher] Triggering combineAndImportStagedFiles for data source ${dataSourceId}...`);
         try {
           const combineResult = await combineAndImportStagedFiles(dataSourceId);
+          dlLog(`[Email Fetcher] Combine result: success=${combineResult.success}, rowCount=${combineResult.rowCount}, error=${combineResult.error || 'none'}`);
           if (combineResult.success) {
-            console.log(
-              `[Email Fetcher] Combine successful: ${combineResult.rowCount} items imported`,
-            );
+            dlLog(`[Email Fetcher] Combine successful: ${combineResult.rowCount} items imported`);
             // Trigger consolidation and sync after successful combine
             try {
               await triggerAutoConsolidationAfterImport(dataSourceId);
             } catch (err: any) {
-              console.error(
-                "Error in auto-consolidation after combine:",
-                err.message,
-              );
+              dlLog(`[Email Fetcher] Error in auto-consolidation after combine: ${err.message}`);
             }
             triggerShopifySyncAfterImport(dataSourceId).catch((err: any) => {
-              console.error(
-                "Error triggering Shopify sync after combine:",
-                err.message,
-              );
+              dlLog(`[Email Fetcher] Error triggering Shopify sync after combine: ${err.message}`);
             });
           } else {
-            console.error(
-              `[Email Fetcher] Combine failed: ${combineResult.error}`,
-            );
+            dlLog(`[Email Fetcher] Combine FAILED: ${combineResult.error}`);
           }
         } catch (combineErr: any) {
-          console.error(
-            `[Email Fetcher] Error in combine step: ${combineErr.message}`,
-          );
+          dlLog(`[Email Fetcher] EXCEPTION in combine step: ${combineErr.message}\n${combineErr.stack}`);
         }
+      } else {
+        dlLog(`[Email Fetcher] No files staged - skipping combine step`);
       }
 
       // Send email notification ONCE after all emails are processed
@@ -645,27 +637,40 @@ async function extractLinksFromEmailBody(
   const files: Array<{ filename: string; content: Buffer }> = [];
 
   try {
+    dlLog(`[Email Fetcher] extractLinksFromEmailBody called for UID ${uid}`);
     const message = await client.fetchOne(
       uid,
       { bodyStructure: true },
       { uid: true },
     );
 
-    if (!message) return files;
+    if (!message) {
+      dlLog(`[Email Fetcher] No message found for UID ${uid}`);
+      return files;
+    }
 
     const bodyStructure = (message as any).bodyStructure;
-    if (!bodyStructure) return files;
+    if (!bodyStructure) {
+      dlLog(`[Email Fetcher] No bodyStructure for UID ${uid}`);
+      return files;
+    }
 
     const parts = flattenParts(bodyStructure);
+    dlLog(`[Email Fetcher] Found ${parts.length} MIME parts in email`);
 
     let htmlContent = "";
     let textContent = "";
 
     for (const part of parts) {
-      if (
-        part.type === "text" &&
-        (part.subtype === "html" || part.subtype === "plain")
-      ) {
+      const mimeType = (part.type || "").toLowerCase();
+      const subtype = (part.subtype || "").toLowerCase();
+      dlLog(`[Email Fetcher] MIME part: type=${mimeType} subtype=${subtype} part=${part.part}`);
+
+      // Handle both formats: type="text" + subtype="html" OR type="text/html"
+      const isTextPlain = (mimeType === "text" && subtype === "plain") || mimeType === "text/plain";
+      const isTextHtml = (mimeType === "text" && subtype === "html") || mimeType === "text/html";
+
+      if (isTextPlain || isTextHtml) {
         try {
           const { content } = await client.download(uid.toString(), part.part, {
             uid: true,
@@ -675,25 +680,27 @@ async function extractLinksFromEmailBody(
             chunks.push(chunk);
           }
           const decoded = Buffer.concat(chunks).toString("utf-8");
-          if (part.subtype === "html") {
+          if (isTextHtml) {
             htmlContent = decoded;
+            dlLog(`[Email Fetcher] Got HTML body: ${decoded.length} chars`);
           } else {
             textContent = decoded;
+            dlLog(`[Email Fetcher] Got text body: ${decoded.length} chars`);
           }
-        } catch (e) {
-          console.error(
-            `[Email Fetcher] Failed to get body part ${part.part}:`,
-            e,
-          );
+        } catch (e: any) {
+          dlLog(`[Email Fetcher] Failed to get body part ${part.part}: ${e.message}`);
         }
       }
     }
 
     const bodyContent = htmlContent || textContent;
     if (!bodyContent) {
-      console.log(`[Email Fetcher] No body content found for UID ${uid}`);
+      dlLog(`[Email Fetcher] No body content found for UID ${uid} - RETURNING EMPTY`);
       return files;
     }
+
+    dlLog(`[Email Fetcher] Body content length: ${bodyContent.length} chars`)
+    dlLog(`[Email Fetcher] Body preview: ${bodyContent.substring(0, 500)}`);
 
     const urlRegex = /https?:\/\/[^\s"'<>]+\.(?:csv|xlsx|xls)/gi;
     const hrefRegex =
@@ -821,11 +828,24 @@ async function extractLinksFromEmailBody(
 
           // Extract filename from Content-Disposition header
           let filename = "download.csv";
-          const cdMatch = responseHeaders.match(
-            /content-disposition:.*?filename[*]?=["']?([^;"'\r\n]+)/i,
+          // Handle RFC 5987 format: filename*=utf-8''URL_ENCODED_NAME
+          const cdRfc5987 = responseHeaders.match(
+            /content-disposition:.*?filename\*=(?:utf-8|UTF-8)?''([^\r\n;]+)/i,
           );
-          if (cdMatch) {
-            filename = cdMatch[1].trim();
+          if (cdRfc5987) {
+            try {
+              filename = decodeURIComponent(cdRfc5987[1].trim());
+            } catch {
+              filename = cdRfc5987[1].trim();
+            }
+          } else {
+            // Handle standard format: filename="name" or filename=name
+            const cdMatch = responseHeaders.match(
+              /content-disposition:.*?filename=["']?([^;"'\r\n]+)/i,
+            );
+            if (cdMatch) {
+              filename = cdMatch[1].trim();
+            }
           }
 
           if (filename === "download.csv") {
