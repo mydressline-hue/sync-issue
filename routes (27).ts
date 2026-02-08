@@ -2281,8 +2281,48 @@ export async function performCombineImport(
   // Combine items from all staged files
   const allItems: any[] = [];
   let allRows: any[][] = [];
-  const columnMapping = (dataSource.columnMapping as any) || {};
+  let columnMapping = (dataSource.columnMapping as any) || {};
   const cleaningConfig = (dataSource.cleaningConfig as any) || {};
+
+  // AUTO-DETECT column mapping when empty (needed for email import where
+  // pre-parsed files have standard headers like sku, style, color, size, stock
+  // but the data source has no columnMapping configured)
+  if (!columnMapping || Object.keys(columnMapping).length === 0) {
+    const firstFile = stagedFiles[0];
+    const firstHeaders = (firstFile?.headers as string[]) || [];
+    const lowerHeaders = firstHeaders.map((h: string) => (h || "").toLowerCase().trim());
+
+    const standardFields: Record<string, string[]> = {
+      sku: ["sku"],
+      style: ["style"],
+      color: ["color"],
+      size: ["size"],
+      stock: ["stock", "quantity", "qty"],
+      cost: ["cost"],
+      price: ["price"],
+      shipDate: ["shipdate", "ship date", "ship_date"],
+      futureStock: ["futurestock", "future stock", "future_stock"],
+      futureDate: ["futuredate", "future date", "future_date"],
+      incomingStock: ["incomingstock", "incoming stock", "incoming_stock"],
+      discontinued: ["discontinued"],
+    };
+
+    const autoMapping: any = {};
+    for (const [field, aliases] of Object.entries(standardFields)) {
+      for (const alias of aliases) {
+        const idx = lowerHeaders.indexOf(alias.toLowerCase());
+        if (idx >= 0) {
+          autoMapping[field] = firstHeaders[idx];
+          break;
+        }
+      }
+    }
+
+    if (Object.keys(autoMapping).length > 0) {
+      columnMapping = autoMapping;
+      console.log(`[Combine] columnMapping was empty — auto-detected from headers: ${JSON.stringify(columnMapping)}`);
+    }
+  }
 
   const isJovaniSaleFormat = cleaningConfig?.pivotedFormat?.vendor === "jovani";
   const isSaleFile = (dataSource as any).sourceType === "sales";
