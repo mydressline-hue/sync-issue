@@ -2035,6 +2035,19 @@ export async function processEmailAttachment(
     const isMultiFile = forceStage || (dataSource as any).ingestionMode === "multi";
     const pivotConfig = (dataSource as any).pivotConfig;
 
+    // Diagnostic logger for email import debugging
+    const eLog = (msg: string) => {
+      const line = `[${new Date().toISOString()}] ${msg}\n`;
+      try { fs.appendFileSync("/tmp/email_download.log", line); } catch {}
+    };
+
+    eLog(`[EmailImport] === Processing file: "${filename}" for "${dataSource.name}" ===`);
+    eLog(`[EmailImport] isMultiFile=${isMultiFile}, forceStage=${forceStage}, ingestionMode=${(dataSource as any).ingestionMode}`);
+    eLog(`[EmailImport] pivotConfig=${JSON.stringify(pivotConfig)}`);
+    eLog(`[EmailImport] columnMapping=${JSON.stringify(columnMapping)}`);
+    eLog(`[EmailImport] Buffer size: ${buffer.length} bytes`);
+    eLog(`[EmailImport] Buffer preview (first 200 chars): ${buffer.toString("utf-8", 0, Math.min(200, buffer.length))}`);
+
     const lastFile = await storage.getLatestFile(dataSourceId);
     const expectedHeaders = lastFile?.headers || [];
     const lastRowCount = lastFile?.rowCount || 0;
@@ -2043,13 +2056,18 @@ export async function processEmailAttachment(
     let headers: string[];
     let rows: any[][];
     let items: any[];
+    let parserUsed = "unknown";
 
     // AUTO-DETECT OTS FORMAT: Check if file has ots1, ots2, etc. columns
     // This allows OTS files to be imported without manual configuration
     const isOTS = pivotConfig?.format === "ots_format" || isOTSFormat(buffer);
 
     // Sherri Hill format
+    const isOTSLog = isOTS ? "YES (ots_format)" : "no";
+    eLog(`[EmailImport] isOTS=${isOTSLog}, pivotConfig?.format="${pivotConfig?.format}", pivotConfig?.enabled=${pivotConfig?.enabled}`);
+
     if (pivotConfig?.format === "sherri_hill") {
+      parserUsed = "sherri_hill";
       console.log(
         `[Email Import] Using Sherri Hill specific parser for ${dataSource.name}`,
       );
@@ -2072,6 +2090,7 @@ export async function processEmailAttachment(
         items = fallback.items;
       }
     } else if (pivotConfig?.format === "jovani") {
+      parserUsed = "jovani";
       console.log(
         `[Email Import] Using Jovani specific parser for ${dataSource.name}`,
       );
@@ -2098,6 +2117,7 @@ export async function processEmailAttachment(
         items = fallback.items;
       }
     } else if (pivotConfig?.format === "tarik_ediz") {
+      parserUsed = "tarik_ediz";
       console.log(
         `[Email Import] Using Tarik Ediz specific parser for ${dataSource.name}`,
       );
@@ -2125,6 +2145,7 @@ export async function processEmailAttachment(
         items = fallback.items;
       }
     } else if (pivotConfig?.format === "feriani_gia") {
+      parserUsed = "feriani_gia";
       console.log(
         `[Email Import] Using Feriani/GIA specific parser for ${dataSource.name}`,
       );
@@ -2147,6 +2168,7 @@ export async function processEmailAttachment(
         items = fallback.items;
       }
     } else if (isOTS) {
+      parserUsed = "ots_format";
       console.log(
         `[Email Import] Using OTS FORMAT parser for ${dataSource.name}`,
       );
@@ -2164,6 +2186,7 @@ export async function processEmailAttachment(
       );
     } else if (pivotConfig?.format === "generic_pivot") {
       // CRITICAL FIX: Check for generic_pivot format (INESS, Colette, Alyce, etc.)
+      parserUsed = "generic_pivot";
       console.log(
         `[Email Import] Using GENERIC PIVOT parser for ${dataSource.name}`,
       );
@@ -2187,6 +2210,7 @@ export async function processEmailAttachment(
         `[Email Import] Generic pivot parse complete: ${items.length} items extracted`,
       );
     } else if (pivotConfig?.format === "grn_invoice") {
+      parserUsed = "grn_invoice";
       console.log(
         `[Email Import] Using GRN-INVOICE parser for ${dataSource.name}`,
       );
@@ -2203,6 +2227,7 @@ export async function processEmailAttachment(
         `[Email Import] GRN-INVOICE parse complete: ${items.length} items extracted`,
       );
     } else if (pivotConfig?.format === "pr_date_headers") {
+      parserUsed = "pr_date_headers";
       console.log(
         `[Email Import] Using PR DATE HEADERS parser for ${dataSource.name}`,
       );
@@ -2219,6 +2244,7 @@ export async function processEmailAttachment(
         `[Email Import] PR date headers parse complete: ${items.length} items extracted`,
       );
     } else if (pivotConfig?.format === "store_multibrand") {
+      parserUsed = "store_multibrand";
       console.log(
         `[Email Import] Using STORE MULTIBRAND parser for ${dataSource.name}`,
       );
@@ -2235,6 +2261,7 @@ export async function processEmailAttachment(
         `[Email Import] Store multibrand parse complete: ${items.length} items extracted`,
       );
     } else if (pivotConfig?.enabled) {
+      parserUsed = "pivoted_generic (pivotConfig.enabled)";
       console.log(
         `[Email Import] Using pivoted table parser for ${dataSource.name}`,
       );
@@ -2253,6 +2280,7 @@ export async function processEmailAttachment(
         `[Email Import] Pivoted parse complete: ${items.length} items extracted`,
       );
     } else {
+      parserUsed = "parseExcelToInventory (fallback)";
       const result = parseExcelToInventory(
         buffer,
         columnMapping,
@@ -2261,6 +2289,20 @@ export async function processEmailAttachment(
       headers = result.headers;
       rows = result.rows;
       items = result.items;
+    }
+
+    // Log parsing results for debugging
+    eLog(`[EmailImport] Parser used: ${parserUsed}`);
+    eLog(`[EmailImport] Parse result: headers=${JSON.stringify(headers?.slice(0, 15))}`);
+    eLog(`[EmailImport] Parse result: rows=${rows?.length || 0}, items=${items?.length || 0}`);
+    if (rows?.length > 0) {
+      eLog(`[EmailImport] Sample row[0]: ${JSON.stringify(rows[0]?.slice(0, 10))}`);
+    }
+    if (rows?.length > 1) {
+      eLog(`[EmailImport] Sample row[1]: ${JSON.stringify(rows[1]?.slice(0, 10))}`);
+    }
+    if (items?.length > 0) {
+      eLog(`[EmailImport] Sample item[0]: ${JSON.stringify(items[0])}`);
     }
 
     // Helper function to send immediate alert if enabled (wrapped to not reject import promise)
@@ -2528,6 +2570,14 @@ export async function processEmailAttachment(
 
     // For multi-file mode, stage the file instead of importing immediately
     if (isMultiFile) {
+      eLog(`[EmailImport] STAGING file for multi-file mode: "${filename}"`);
+      eLog(`[EmailImport] Staging headers: ${JSON.stringify(headers)}`);
+      eLog(`[EmailImport] Staging rows count: ${rows?.length || 0}`);
+      if (rows?.length > 0) {
+        eLog(`[EmailImport] Staging row[0]: ${JSON.stringify(rows[0])}`);
+        eLog(`[EmailImport] Staging row[last]: ${JSON.stringify(rows[rows.length - 1])}`);
+      }
+
       await storage.createUploadedFile({
         dataSourceId,
         fileName: filename,
@@ -2538,6 +2588,7 @@ export async function processEmailAttachment(
         fileStatus: "staged",
       } as any);
 
+      eLog(`[EmailImport] File staged successfully: ${rows.length} rows`);
       return { success: true, rowCount: rows.length, staged: true };
     }
 
