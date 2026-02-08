@@ -105,11 +105,17 @@ export async function fetchEmailAttachments(
     );
   });
 
+  // Clear log file for fresh run
+  try { fs.writeFileSync(LOG_FILE, `=== Email Fetch Log - ${new Date().toISOString()} ===\nDataSource: ${dataSourceId}\nextractLinksFromBody: ${settings.extractLinksFromBody}\nmultiFileMode: ${settings.multiFileMode}\nexpectedFiles: ${settings.expectedFiles}\nsenderWhitelist: ${JSON.stringify(settings.senderWhitelist)}\n`); } catch {}
+
   try {
+    dlLog(`[Email Fetcher] Connecting to IMAP ${settings.host}...`);
     await client.connect();
+    dlLog(`[Email Fetcher] Connected to IMAP`);
 
     const folder = settings.folder || "INBOX";
     const lock = await client.getMailboxLock(folder);
+    dlLog(`[Email Fetcher] Got mailbox lock on ${folder}`);
 
     try {
       // First, try to search for unread emails
@@ -125,15 +131,10 @@ export async function fetchEmailAttachments(
       }
       // For multiple senders, whitelist filtering happens in the loop below
 
-      console.log(
-        `[Email Fetcher] Searching with criteria:`,
-        JSON.stringify(searchCriteria),
-      );
+      dlLog(`[Email Fetcher] Searching with criteria: ${JSON.stringify(searchCriteria)}`);
       let messagesResult = await client.search(searchCriteria, { uid: true });
       let messages = Array.isArray(messagesResult) ? messagesResult : [];
-      console.log(
-        `[Email Fetcher] Found ${messages.length} unread emails matching criteria`,
-      );
+      dlLog(`[Email Fetcher] Found ${messages.length} unread emails matching criteria`);
 
       // If no unread emails found, also search recent emails (last 7 days) regardless of read status
       if (messages.length === 0) {
@@ -148,14 +149,10 @@ export async function fetchEmailAttachments(
           }
         }
 
-        console.log(
-          `[Email Fetcher] No unread emails, searching all emails from last 7 days...`,
-        );
+        dlLog(`[Email Fetcher] No unread emails, searching all emails from last 7 days...`);
         messagesResult = await client.search(allSearchCriteria, { uid: true });
         messages = Array.isArray(messagesResult) ? messagesResult : [];
-        console.log(
-          `[Email Fetcher] Found ${messages.length} total emails from last 7 days`,
-        );
+        dlLog(`[Email Fetcher] Found ${messages.length} total emails from last 7 days`);
       }
 
       // Fetch all message envelopes to get dates and senders
@@ -185,7 +182,10 @@ export async function fetchEmailAttachments(
             const isWhitelisted = settings.senderWhitelist.some((email) =>
               from.toLowerCase().includes(email.toLowerCase().trim()),
             );
-            if (!isWhitelisted) continue;
+            if (!isWhitelisted) {
+              dlLog(`[Email Fetcher] SKIPPED email from ${from} - not in whitelist`);
+              continue;
+            }
           }
 
           // Apply subject filter
@@ -195,9 +195,11 @@ export async function fetchEmailAttachments(
               .toLowerCase()
               .includes(settings.subjectFilter.toLowerCase())
           ) {
+            dlLog(`[Email Fetcher] SKIPPED email "${subject}" - subject filter mismatch`);
             continue;
           }
 
+          dlLog(`[Email Fetcher] MATCHED email UID ${uid} from ${from}: "${subject}" (${emailDate?.toISOString() || "no date"})`);
           messageInfos.push({ uid, from, subject, date: emailDate });
         } catch (err) {
           // Skip messages we can't fetch
@@ -218,9 +220,7 @@ export async function fetchEmailAttachments(
       // SHA-256 hash deduplication below prevents reprocessing the same attachment twice
       const allWhitelistedMessages = messageInfos;
 
-      console.log(
-        `[Email Fetcher] Found ${allWhitelistedMessages.length} matching emails, processing all`,
-      );
+      dlLog(`[Email Fetcher] Found ${allWhitelistedMessages.length} matching emails, processing all`);
 
       const successfulUids = new Set<number>();
       let anyFileStagedGlobal = false;
@@ -230,9 +230,7 @@ export async function fetchEmailAttachments(
         const { uid, from, subject, date: emailDate } = msgInfo;
 
         try {
-          console.log(
-            `[Email Fetcher] Processing email from ${from} (${emailDate?.toISOString() || "no date"})`,
-          );
+          dlLog(`[Email Fetcher] Processing email from ${from} (${emailDate?.toISOString() || "no date"})`);
 
           const fullMessage = await client.download(uid.toString(), undefined, {
             uid: true,
@@ -246,16 +244,16 @@ export async function fetchEmailAttachments(
             const rawEmail = Buffer.concat(chunks);
 
             const attachments = await extractAttachments(client, uid);
+            dlLog(`[Email Fetcher] Found ${attachments.length} direct attachments`);
 
             if (settings.extractLinksFromBody) {
-              console.log(
-                `[Email Fetcher] Extracting download links from email body...`,
-              );
+              dlLog(`[Email Fetcher] extractLinksFromBody=true, calling extractLinksFromEmailBody...`);
               const bodyFiles = await extractLinksFromEmailBody(client, uid);
+              dlLog(`[Email Fetcher] Body link extraction returned ${bodyFiles.length} files`);
               attachments.push(...bodyFiles);
-              console.log(
-                `[Email Fetcher] Total files after body extraction: ${attachments.length}`,
-              );
+              dlLog(`[Email Fetcher] Total files after body extraction: ${attachments.length}`);
+            } else {
+              dlLog(`[Email Fetcher] extractLinksFromBody is FALSE - skipping link extraction`);
             }
 
             // Get the last successful email date for this data source to enable date-aware duplicate detection
