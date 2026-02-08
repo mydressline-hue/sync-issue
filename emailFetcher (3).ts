@@ -645,23 +645,32 @@ async function extractLinksFromEmailBody(
   const files: Array<{ filename: string; content: Buffer }> = [];
 
   try {
+    dlLog(`[Email Fetcher] extractLinksFromEmailBody called for UID ${uid}`);
     const message = await client.fetchOne(
       uid,
       { bodyStructure: true },
       { uid: true },
     );
 
-    if (!message) return files;
+    if (!message) {
+      dlLog(`[Email Fetcher] No message found for UID ${uid}`);
+      return files;
+    }
 
     const bodyStructure = (message as any).bodyStructure;
-    if (!bodyStructure) return files;
+    if (!bodyStructure) {
+      dlLog(`[Email Fetcher] No bodyStructure for UID ${uid}`);
+      return files;
+    }
 
     const parts = flattenParts(bodyStructure);
+    dlLog(`[Email Fetcher] Found ${parts.length} MIME parts in email`);
 
     let htmlContent = "";
     let textContent = "";
 
     for (const part of parts) {
+      dlLog(`[Email Fetcher] MIME part: type=${part.type} subtype=${part.subtype} part=${part.part}`);
       if (
         part.type === "text" &&
         (part.subtype === "html" || part.subtype === "plain")
@@ -677,23 +686,25 @@ async function extractLinksFromEmailBody(
           const decoded = Buffer.concat(chunks).toString("utf-8");
           if (part.subtype === "html") {
             htmlContent = decoded;
+            dlLog(`[Email Fetcher] Got HTML body: ${decoded.length} chars`);
           } else {
             textContent = decoded;
+            dlLog(`[Email Fetcher] Got text body: ${decoded.length} chars`);
           }
-        } catch (e) {
-          console.error(
-            `[Email Fetcher] Failed to get body part ${part.part}:`,
-            e,
-          );
+        } catch (e: any) {
+          dlLog(`[Email Fetcher] Failed to get body part ${part.part}: ${e.message}`);
         }
       }
     }
 
     const bodyContent = htmlContent || textContent;
     if (!bodyContent) {
-      console.log(`[Email Fetcher] No body content found for UID ${uid}`);
+      dlLog(`[Email Fetcher] No body content found for UID ${uid} - RETURNING EMPTY`);
       return files;
     }
+
+    dlLog(`[Email Fetcher] Body content length: ${bodyContent.length} chars`)
+    dlLog(`[Email Fetcher] Body preview: ${bodyContent.substring(0, 500)}`);
 
     const urlRegex = /https?:\/\/[^\s"'<>]+\.(?:csv|xlsx|xls)/gi;
     const hrefRegex =
