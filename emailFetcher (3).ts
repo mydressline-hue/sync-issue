@@ -251,6 +251,20 @@ export async function fetchEmailAttachments(
             let anyFileImported = false;
             let anyFileStaged = false;
 
+            // FIX: Detect multiple Excel files - force staging to prevent overwrites
+            // When multiple files are downloaded from links in single-file mode,
+            // each atomicReplace would delete the previous file's data.
+            // Force staging so all files are combined at the end.
+            const excelFileCount = attachments.filter((a) =>
+              isExcelFile(a.filename),
+            ).length;
+            const forceStageMultiple = excelFileCount > 1;
+            if (forceStageMultiple) {
+              console.log(
+                `[Email Fetcher] Detected ${excelFileCount} Excel files - forcing staging to combine all files`,
+              );
+            }
+
             for (const attachment of attachments) {
               if (!isExcelFile(attachment.filename)) continue;
 
@@ -295,6 +309,7 @@ export async function fetchEmailAttachments(
                   dataSourceId,
                   attachment.content,
                   attachment.filename,
+                  forceStageMultiple, // FIX: Force staging when multiple files detected
                 );
 
                 await storage.createEmailFetchLog({

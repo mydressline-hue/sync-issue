@@ -1964,6 +1964,7 @@ export async function processEmailAttachment(
   dataSourceId: string,
   buffer: Buffer,
   filename: string,
+  forceStage?: boolean,
 ): Promise<{
   success: boolean;
   rowCount: number;
@@ -2029,7 +2030,8 @@ export async function processEmailAttachment(
 
     const columnMapping = (dataSource.columnMapping || {}) as any;
     const cleaningConfig = (dataSource.cleaningConfig || {}) as any;
-    const isMultiFile = (dataSource as any).ingestionMode === "multi";
+    // FIX: Also stage files when forceStage is true (multiple link/attachment files detected)
+    const isMultiFile = forceStage || (dataSource as any).ingestionMode === "multi";
     const pivotConfig = (dataSource as any).pivotConfig;
 
     const lastFile = await storage.getLatestFile(dataSourceId);
@@ -3024,15 +3026,32 @@ export async function combineAndImportStagedFiles(
     const cleaningConfig = (dataSource.cleaningConfig || {}) as any;
 
     let allItems: any[] = [];
+    let allRows: any[][] = []; // Accumulate all rows for applyImportRules rawDataRows parameter
 
     for (const file of filesToProcess) {
       const previewData = file.previewData as any[];
       const headers = file.headers as string[];
 
       if (!previewData || !headers) continue;
+      allRows.push(...previewData);
+
+      // Build header index map for this file
+      const headerIndexMap: Record<string, number> = {};
+      headers.forEach((h: string, idx: number) => {
+        if (h) headerIndexMap[h.toLowerCase().trim()] = idx;
+      });
+
+      // Check if this is a pre-parsed pivoted format file
+      // Pivoted files have headers like ["style", "color", "size", "stock", "cost"]
+      const isPivotedPreParsed =
+        cleaningConfig?.pivotedFormat?.enabled &&
+        headerIndexMap["style"] !== undefined &&
+        headerIndexMap["size"] !== undefined;
 
       const items = previewData
         .map((row: any[]) => {
+          if (!Array.isArray(row)) return null;
+
           const getColValue = (colName: string) => {
             if (!colName) return null;
             const colIndex = headers.findIndex(
@@ -3041,12 +3060,40 @@ export async function combineAndImportStagedFiles(
             return colIndex >= 0 ? row[colIndex] : null;
           };
 
-          let sku = getColValue(columnMapping?.sku || "") || "";
-          let style = getColValue(columnMapping?.style || "") || "";
-          // FIX: Use ?? instead of || to preserve numeric 0 (valid size like "0" or "00")
-          let size = getColValue(columnMapping?.size || "") ?? "";
-          let color = getColValue(columnMapping?.color || "") || "";
-          let stockValue = getColValue(columnMapping?.stock || "");
+          let sku: string;
+          let style: string;
+          let size: string;
+          let color: string;
+          let stockValue: any;
+          let costValue: any;
+          let priceValue: any;
+          let shipDateValue: any;
+          let futureStockValue: any;
+          let futureDateValue: any;
+
+          if (isPivotedPreParsed) {
+            // Use direct column names from pivoted format parsing
+            sku = String(getColValue("style") || "");
+            style = String(getColValue("style") || "");
+            size = String(getColValue("size") ?? "");
+            color = String(getColValue("color") || "");
+            stockValue = getColValue("stock");
+            costValue = getColValue("cost");
+            priceValue = getColValue("price");
+            shipDateValue = getColValue("shipDate");
+          } else {
+            // Use column mapping
+            sku = String(getColValue(columnMapping?.sku || "") || "");
+            style = String(getColValue(columnMapping?.style || "") || "");
+            size = String(getColValue(columnMapping?.size || "") ?? "");
+            color = String(getColValue(columnMapping?.color || "") || "");
+            stockValue = getColValue(columnMapping?.stock || "");
+            costValue = getColValue(columnMapping?.cost || "");
+            priceValue = getColValue(columnMapping?.price || "");
+            shipDateValue = getColValue(columnMapping?.shipDate || "");
+            futureStockValue = getColValue(columnMapping?.futureStock || "");
+            futureDateValue = getColValue(columnMapping?.futureDate || "");
+          }
 
           style = applyCleaningToValue(
             String(style || ""),
@@ -3064,18 +3111,102 @@ export async function combineAndImportStagedFiles(
 
           if (!sku && style) sku = style;
 
+          // Convert stock to number (with yes/no support)
           let stock = 0;
           if (typeof stockValue === "number") {
             stock = stockValue;
           } else if (typeof stockValue === "string") {
-            const parsed = Math.max(
-              0,
-              Math.round(parseFloat(stockValue.replace(/[^0-9.-]/g, ""))),
-            );
-            stock = isNaN(parsed) ? 0 : parsed;
+            if (cleaningConfig.convertYesNo) {
+              const lower = stockValue.toLowerCase().trim();
+              if (lower === "yes" || lower === "y" || lower === "true") {
+                stock = cleaningConfig.yesValue ?? 1;
+              } else if (lower === "no" || lower === "n" || lower === "false") {
+                stock = cleaningConfig.noValue ?? 0;
+              } else {
+                const parsed = Math.max(
+                  0,
+                  Math.round(parseFloat(stockValue.replace(/[^0-9.-]/g, ""))),
+                );
+                stock = isNaN(parsed) ? 0 : parsed;
+              }
+            } else {
+              const parsed = Math.max(
+                0,
+                Math.round(parseFloat(stockValue.replace(/[^0-9.-]/g, ""))),
+              );
+              stock = isNaN(parsed) ? 0 : parsed;
+            }
           }
 
-          return { sku, style, size, color, stock };
+          // Clean cost/price values
+          const cost = costValue
+            ? String(costValue).replace(/[$,]/g, "").trim()
+            : null;
+          const price = priceValue
+            ? String(priceValue).replace(/[$,]/g, "").trim()
+            : null;
+
+          // Parse ship date
+          let shipDate: string | null = null;
+          if (shipDateValue) {
+            if (typeof shipDateValue === "number") {
+              const excelEpoch = new Date(1899, 11, 30);
+              const date = new Date(
+                excelEpoch.getTime() + shipDateValue * 24 * 60 * 60 * 1000,
+              );
+              shipDate = date.toISOString().split("T")[0];
+            } else {
+              const dateStr = String(shipDateValue).trim();
+              if (dateStr) {
+                const parsedDate = new Date(dateStr);
+                if (!isNaN(parsedDate.getTime())) {
+                  shipDate = parsedDate.toISOString().split("T")[0];
+                }
+              }
+            }
+          }
+
+          // Parse future stock value
+          let futureStock: number | null = null;
+          if (futureStockValue !== undefined && futureStockValue !== null && futureStockValue !== "") {
+            const parsed = parseFloat(String(futureStockValue).replace(/[^0-9.-]/g, ""));
+            if (!isNaN(parsed)) futureStock = parsed;
+          }
+
+          // Parse future date value
+          let futureDate: string | null = null;
+          if (futureDateValue) {
+            if (typeof futureDateValue === "number") {
+              const excelEpoch = new Date(1899, 11, 30);
+              const date = new Date(
+                excelEpoch.getTime() + futureDateValue * 24 * 60 * 60 * 1000,
+              );
+              futureDate = date.toISOString().split("T")[0];
+            } else {
+              const dateStr = String(futureDateValue).trim();
+              if (dateStr) {
+                const parsedDate = new Date(dateStr);
+                if (!isNaN(parsedDate.getTime())) {
+                  futureDate = parsedDate.toISOString().split("T")[0];
+                }
+              }
+            }
+          }
+
+          return {
+            sku,
+            style,
+            size,
+            color,
+            stock,
+            cost,
+            price,
+            shipDate,
+            futureStock,
+            futureDate,
+            hasFutureStock: shipDate || futureDate ? true : false,
+            preserveZeroStock: (shipDate || futureDate) && stock === 0 ? true : false,
+          };
         })
         .filter((item: any) => item && item.sku);
 
@@ -3130,7 +3261,9 @@ export async function combineAndImportStagedFiles(
 
     // Apply configurable import rules (pricing, discontinued, required fields, etc.)
     const importRulesConfig = {
-      discontinuedRules: (dataSource as any).discontinuedRules,
+      discontinuedRules:
+        (dataSource as any).discontinuedConfig ||
+        (dataSource as any).discontinuedRules,
       salePriceConfig: (dataSource as any).salePriceConfig,
       priceFloorCeiling: (dataSource as any).priceFloorCeiling,
       minStockThreshold: (dataSource as any).minStockThreshold,
@@ -3141,10 +3274,13 @@ export async function combineAndImportStagedFiles(
       regularPriceConfig: (dataSource as any).regularPriceConfig,
       cleaningConfig: dataSource.cleaningConfig,
       futureStockConfig: (dataSource as any).futureStockConfig,
+      stockValueConfig: (dataSource as any).stockValueConfig,
+      complexStockConfig: (dataSource as any).complexStockConfig,
     };
     const importRulesResult = await applyImportRules(
       prefixedItems, // Use prefixed items
       importRulesConfig,
+      allRows, // FIX: Pass accumulated rows for sale pricing rawData lookup
     );
     const ruleResult = await applyVariantRules(
       importRulesResult.items,

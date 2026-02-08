@@ -4489,6 +4489,7 @@ export async function registerRoutes(
       // Combine items from all staged files
       // Note: For multi-file mode, previewData stores ALL rows (not just 10)
       const allItems: any[] = [];
+      let allRows: any[][] = []; // Accumulate rows from all files for applyImportRules
       const columnMapping = (dataSource.columnMapping as any) || {};
       const cleaningConfig = (dataSource.cleaningConfig as any) || {};
 
@@ -4502,6 +4503,8 @@ export async function registerRoutes(
       for (const file of stagedFiles) {
         const rows = (file.previewData as any[]) || [];
         const headers = (file.headers as string[]) || [];
+        // Accumulate all rows for applyImportRules rawDataRows parameter
+        allRows.push(...rows);
 
         // Build header index map for this file
         const headerIndexMap: Record<string, number> = {};
@@ -4913,7 +4916,7 @@ export async function registerRoutes(
       const importRulesResult = await applyImportRules(
         cleanResult.items,
         importRulesConfig,
-        rows, // CRITICAL FIX: Pass rows parameter to match Manual import behavior
+        allRows, // FIX: Use allRows (accumulated from all staged files) instead of out-of-scope block-scoped rows
       );
 
       // Step 2: Apply variant rules (filter zero stock, expand sizes, etc.)
