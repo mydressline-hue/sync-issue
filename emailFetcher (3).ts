@@ -21,7 +21,8 @@ import {
   processEmailAttachment,
   logSystemError,
 } from "./importUtils";
-import { triggerAutoConsolidationAfterImport, performCombineImport } from "./routes";
+import { triggerAutoConsolidationAfterImport } from "./routes";
+import { executeAIImport } from "./aiImportRoutes";
 import { triggerShopifySyncAfterImport } from "./scheduler";
 import {
   sendEmailFetcherAlert,
@@ -223,6 +224,7 @@ export async function fetchEmailAttachments(
 
       const successfulUids = new Set<number>();
       let anyFileStagedGlobal = false;
+      const collectedBuffers: { buffer: Buffer; originalname: string }[] = [];
 
       // Process all emails from whitelisted senders
       for (const msgInfo of allWhitelistedMessages) {
@@ -318,12 +320,44 @@ export async function fetchEmailAttachments(
               }
 
               try {
+                // Multi-file mode: collect raw buffers for executeAIImport
+                // instead of staging files individually via processEmailAttachment
+                if (forceStageMultiple) {
+                  collectedBuffers.push({ buffer: attachment.content, originalname: attachment.filename });
+                  dlLog(`[Email Fetcher] Collected buffer for ${attachment.filename} (${attachment.content.length} bytes) - will use executeAIImport`);
+
+                  await storage.createEmailFetchLog({
+                    dataSourceId,
+                    emailFrom: from,
+                    emailSubject: subject,
+                    emailDate: emailDate || null,
+                    fileName: attachment.filename,
+                    fileHash,
+                    rowCount: 0,
+                    status: "success",
+                    errorMessage: null,
+                  });
+
+                  result.filesProcessed++;
+                  result.logs.push({
+                    emailFrom: from,
+                    emailSubject: subject,
+                    fileName: attachment.filename,
+                    status: "success",
+                  });
+                  if (emailDate) {
+                    lastSuccessfulEmailDate = emailDate;
+                  }
+                  anyFileStaged = true;
+                  continue;
+                }
+
                 dlLog(`[Email Fetcher] Calling processEmailAttachment for ${attachment.filename} (${attachment.content.length} bytes, forceStage=${forceStageMultiple})`);
                 const importResult = await processEmailAttachment(
                   dataSourceId,
                   attachment.content,
                   attachment.filename,
-                  forceStageMultiple, // FIX: Force staging when multiple files detected
+                  forceStageMultiple,
                 );
                 dlLog(`[Email Fetcher] processEmailAttachment result: success=${importResult.success}, staged=${importResult.staged}, rowCount=${importResult.rowCount}, error=${importResult.error || 'none'}`);
 
@@ -436,30 +470,33 @@ export async function fetchEmailAttachments(
       // FIX: After all emails are processed, trigger combine for multi-file sources
       // Previously this was only handled by the scheduler, leaving staged files sitting indefinitely
       dlLog(`[Email Fetcher] Post-processing: anyFileStagedGlobal=${anyFileStagedGlobal}, filesProcessed=${result.filesProcessed}`);
-      if (anyFileStagedGlobal) {
-        dlLog(`[Email Fetcher] Triggering performCombineImport for data source ${dataSourceId}...`);
+      if (anyFileStagedGlobal && collectedBuffers.length > 0) {
+        dlLog(`[Email Fetcher] Calling executeAIImport with ${collectedBuffers.length} collected buffers for data source ${dataSourceId}...`);
         try {
-          const combineResult = await performCombineImport(dataSourceId);
-          dlLog(`[Email Fetcher] Combine result: success=${combineResult.success}, rowCount=${combineResult.rowCount}, error=${combineResult.error || 'none'}`);
-          if (combineResult.success) {
-            dlLog(`[Email Fetcher] Combine successful: ${combineResult.rowCount} items imported`);
-            // Trigger consolidation and sync after successful combine
+          const importResult = await executeAIImport(collectedBuffers, dataSourceId);
+          dlLog(`[Email Fetcher] executeAIImport result: success=${importResult.success}, itemCount=${importResult.itemCount}, error=${importResult.error || 'none'}`);
+          if (importResult.success) {
+            dlLog(`[Email Fetcher] Import successful: ${importResult.itemCount} items imported`);
+            if (importResult.stats) {
+              dlLog(`[Email Fetcher] Stats: ${JSON.stringify(importResult.stats)}`);
+            }
+            // Trigger consolidation and sync after successful import
             try {
               await triggerAutoConsolidationAfterImport(dataSourceId);
             } catch (err: any) {
-              dlLog(`[Email Fetcher] Error in auto-consolidation after combine: ${err.message}`);
+              dlLog(`[Email Fetcher] Error in auto-consolidation after import: ${err.message}`);
             }
             triggerShopifySyncAfterImport(dataSourceId).catch((err: any) => {
-              dlLog(`[Email Fetcher] Error triggering Shopify sync after combine: ${err.message}`);
+              dlLog(`[Email Fetcher] Error triggering Shopify sync after import: ${err.message}`);
             });
           } else {
-            dlLog(`[Email Fetcher] Combine FAILED: ${combineResult.error}`);
+            dlLog(`[Email Fetcher] Import FAILED: ${importResult.error}`);
           }
-        } catch (combineErr: any) {
-          dlLog(`[Email Fetcher] EXCEPTION in combine step: ${combineErr.message}\n${combineErr.stack}`);
+        } catch (importErr: any) {
+          dlLog(`[Email Fetcher] EXCEPTION in executeAIImport: ${importErr.message}\n${importErr.stack}`);
         }
       } else {
-        dlLog(`[Email Fetcher] No files staged - skipping combine step`);
+        dlLog(`[Email Fetcher] No files collected for multi-file import - skipping`);
       }
 
       // Send email notification ONCE after all emails are processed

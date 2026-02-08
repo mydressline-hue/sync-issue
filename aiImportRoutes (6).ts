@@ -3749,4 +3749,546 @@ router.post(
   },
 );
 
+/**
+ * Shared multi-file import function — used by BOTH the /execute route handler
+ * AND the email fetcher. This ensures identical processing for "Import 2 Files"
+ * button and email-based imports.
+ *
+ * Takes raw file buffers, consolidates them, parses with parseIntelligentPivotFormat,
+ * applies the full import pipeline, and saves to DB.
+ */
+export async function executeAIImport(
+  fileBuffers: { buffer: Buffer; originalname: string }[],
+  dataSourceId: string,
+  overrideConfig?: any,
+): Promise<{ success: boolean; itemCount: number; error?: string; fileId?: string; stats?: any }> {
+  const dataSource = await storage.getDataSource(dataSourceId);
+  if (!dataSource) {
+    return { success: false, itemCount: 0, error: "Data source not found" };
+  }
+
+  console.log(`[AIImport:shared] Loaded dataSource "${dataSource.name}", files=${fileBuffers.length}`);
+
+  const enhancedConfig: any = {
+    formatType: (dataSource as any).formatType,
+    columnMapping: dataSource.columnMapping,
+    pivotConfig: (dataSource as any).pivotConfig,
+    discontinuedConfig:
+      (dataSource as any).discontinuedConfig ||
+      (dataSource as any).discontinuedRules,
+    futureStockConfig: (dataSource as any).futureStockConfig,
+    stockValueConfig:
+      (dataSource as any).stockValueConfig ||
+      (dataSource.cleaningConfig?.stockTextMappings?.length > 0
+        ? { textMappings: dataSource.cleaningConfig.stockTextMappings }
+        : undefined),
+    cleaningConfig: (dataSource as any).cleaningConfig,
+  };
+
+  const config: EnhancedImportConfig = {
+    formatType:
+      overrideConfig?.formatType || enhancedConfig.formatType || "row",
+    columnMapping:
+      overrideConfig?.columnMapping || enhancedConfig.columnMapping || {},
+    pivotConfig: overrideConfig?.pivotConfig || enhancedConfig.pivotConfig,
+    discontinuedConfig:
+      overrideConfig?.discontinuedConfig || enhancedConfig.discontinuedConfig,
+    futureStockConfig:
+      overrideConfig?.futureStockConfig || enhancedConfig.futureStockConfig,
+    stockValueConfig:
+      overrideConfig?.stockValueConfig || enhancedConfig.stockValueConfig,
+    cleaningConfig: (dataSource as any).cleaningConfig,
+  };
+
+  // Step 1: Consolidate multiple files
+  let rawData: any[][] = [];
+  const primaryFile = fileBuffers[0];
+
+  if (fileBuffers.length > 1) {
+    console.log(`[AIImport:shared] Consolidating ${fileBuffers.length} files`);
+    let headerRow: any[] | null = null;
+
+    for (const file of fileBuffers) {
+      const wb = XLSX.read(file.buffer, { type: "buffer" });
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      const data = XLSX.utils.sheet_to_json(sheet, {
+        header: 1,
+        defval: "",
+      }) as any[][];
+
+      if (headerRow === null && data.length > 0) {
+        headerRow = data[0];
+        rawData = data;
+      } else if (data.length > 1) {
+        rawData.push(...data.slice(1));
+      }
+    }
+    console.log(`[AIImport:shared] Consolidated ${rawData.length} total rows from ${fileBuffers.length} files`);
+  } else {
+    const workbook = XLSX.read(primaryFile.buffer, { type: "buffer" });
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    rawData = XLSX.utils.sheet_to_json(sheet, {
+      header: 1,
+      defval: "",
+    }) as any[][];
+  }
+
+  // Step 2: Create consolidated buffer for pivot parsing
+  let consolidatedBuffer: Buffer;
+  if (fileBuffers.length > 1) {
+    const newWorkbook = XLSX.utils.book_new();
+    const newSheet = XLSX.utils.aoa_to_sheet(rawData);
+    XLSX.utils.book_append_sheet(newWorkbook, newSheet, "Consolidated");
+    consolidatedBuffer = Buffer.from(
+      XLSX.write(newWorkbook, { type: "buffer", bookType: "xlsx" }),
+    );
+    console.log(`[AIImport:shared] Created consolidated buffer (${consolidatedBuffer.length} bytes)`);
+  } else {
+    consolidatedBuffer = primaryFile.buffer;
+  }
+
+  // Step 3: Auto-detect format and parse
+  const detectedPivotFormat = autoDetectPivotFormat(
+    rawData,
+    dataSource.name,
+    primaryFile.originalname,
+  );
+  const isPivotFormat =
+    config.formatType?.startsWith("pivot") ||
+    config.formatType === "pivoted" ||
+    detectedPivotFormat !== null;
+
+  let parseResult: any;
+
+  if (isPivotFormat) {
+    const actualFormat =
+      detectedPivotFormat || config.formatType || "pivot_interleaved";
+    const universalConfig: UniversalParserConfig = {
+      skipRows: config.pivotConfig?.skipRows,
+      discontinuedConfig: config.discontinuedConfig as any,
+      futureDateConfig: config.futureStockConfig as any,
+      stockConfig: config.stockValueConfig as any,
+      columnMapping: config.columnMapping,
+    };
+
+    const pivotResult = parseIntelligentPivotFormat(
+      consolidatedBuffer,
+      actualFormat,
+      universalConfig,
+      dataSource.name,
+      primaryFile.originalname,
+    );
+
+    parseResult = {
+      success: true,
+      items: pivotResult.items,
+      stats: {
+        totalRows: pivotResult.rows.length,
+        totalItems: pivotResult.items.length,
+        discontinuedItems: pivotResult.items.filter((i: any) => i.discontinued).length,
+        futureStockItems: pivotResult.items.filter((i: any) => i.shipDate).length,
+      },
+      warnings: [],
+    };
+  } else {
+    parseResult = await parseWithEnhancedConfig(
+      primaryFile.buffer,
+      config,
+      dataSourceId,
+    );
+  }
+
+  if (!parseResult.success) {
+    return { success: false, itemCount: 0, error: "Failed to parse file" };
+  }
+
+  console.log(`[AIImport:shared] Parsed ${parseResult.items.length} items`);
+
+  // Step 4: Apply import rules
+  const importRulesConfig = {
+    discontinuedRules:
+      overrideConfig?.discontinuedConfig ||
+      overrideConfig?.discontinuedRules ||
+      (dataSource as any).discontinuedConfig ||
+      (dataSource as any).discontinuedRules,
+    salePriceConfig:
+      overrideConfig?.salePriceConfig ||
+      overrideConfig?.columnSaleConfig ||
+      (dataSource as any).salePriceConfig,
+    priceFloorCeiling: (dataSource as any).priceFloorCeiling,
+    minStockThreshold: (dataSource as any).minStockThreshold,
+    stockThresholdEnabled: (dataSource as any).stockThresholdEnabled,
+    requiredFieldsConfig: (dataSource as any).requiredFieldsConfig,
+    dateFormatConfig: (dataSource as any).dateFormatConfig,
+    valueReplacementRules: (dataSource as any).valueReplacementRules,
+    regularPriceConfig:
+      overrideConfig?.regularPriceConfig ||
+      (dataSource as any).regularPriceConfig,
+    cleaningConfig:
+      overrideConfig?.cleaningConfig || (dataSource as any).cleaningConfig,
+    futureStockConfig:
+      overrideConfig?.futureStockConfig ||
+      (dataSource as any).futureStockConfig,
+    stockValueConfig:
+      overrideConfig?.stockValueConfig ||
+      (dataSource as any).stockValueConfig ||
+      (dataSource.cleaningConfig?.stockTextMappings?.length > 0
+        ? { textMappings: dataSource.cleaningConfig.stockTextMappings }
+        : undefined),
+    complexStockConfig:
+      overrideConfig?.complexStockConfig ||
+      (dataSource as any).complexStockConfig,
+  };
+
+  const importRulesResult = await applyImportRules(
+    parseResult.items,
+    importRulesConfig,
+    rawData,
+  );
+
+  console.log(`[AIImport:shared] After import rules: ${importRulesResult.items.length} items`);
+
+  // Step 5: Apply global color mappings
+  let itemsWithMappedColors = importRulesResult.items;
+  let colorsFixed = 0;
+
+  try {
+    const colorMappings = await storage.getColorMappings();
+    const colorMap = new Map<string, string>();
+    for (const mapping of colorMappings) {
+      const normalizedBad = mapping.badColor.trim().toLowerCase();
+      colorMap.set(normalizedBad, mapping.goodColor);
+    }
+
+    if (colorMap.size > 0) {
+      itemsWithMappedColors = importRulesResult.items.map((item: any) => {
+        const color = String(item.color || "").trim();
+        const normalizedColor = color.toLowerCase();
+        const mappedColor = colorMap.get(normalizedColor);
+
+        if (mappedColor && mappedColor.toLowerCase() !== normalizedColor) {
+          colorsFixed++;
+          const newColor = formatColorName(mappedColor);
+          const newSku =
+            item.style && item.size
+              ? `${item.style}-${newColor}-${item.size}`
+                  .replace(/\//g, "-")
+                  .replace(/\s+/g, "-")
+                  .replace(/-+/g, "-")
+              : item.sku;
+          return { ...item, color: newColor, sku: newSku };
+        }
+        return { ...item, color: formatColorName(color) };
+      });
+
+      if (colorsFixed > 0) {
+        console.log(`[AIImport:shared] Fixed ${colorsFixed} colors using global mappings`);
+      }
+    }
+  } catch (colorMapError: any) {
+    console.error(`[AIImport:shared] Error applying color mappings:`, colorMapError);
+  }
+
+  // Step 6: Apply style prefix
+  const cleaningConfig = (dataSource.cleaningConfig || {}) as any;
+  const getStylePrefixForAI = (style: string): string => {
+    if (
+      cleaningConfig?.useCustomPrefixes &&
+      cleaningConfig?.stylePrefixRules?.length > 0
+    ) {
+      for (const rule of cleaningConfig.stylePrefixRules) {
+        if (rule.pattern && rule.prefix) {
+          try {
+            const regex = new RegExp(rule.pattern, "i");
+            if (regex.test(style)) {
+              return rule.prefix;
+            }
+          } catch (e) {
+            if (style.toLowerCase().startsWith(rule.pattern.toLowerCase())) {
+              return rule.prefix;
+            }
+          }
+        }
+      }
+    }
+    let prefix = dataSource.name;
+    if ((dataSource as any).sourceType === "sales") {
+      const saleMatch = prefix.match(/^(.+?)\s*(Sale|Sales)$/i);
+      if (saleMatch) {
+        prefix = saleMatch[1].trim();
+      }
+    }
+    return prefix;
+  };
+
+  const itemsWithPrefix = itemsWithMappedColors.map((item: any) => {
+    const rawStyle = String(item.style || "").trim();
+    const prefix = rawStyle ? getStylePrefixForAI(rawStyle) : dataSource.name;
+    const prefixedStyle = rawStyle ? `${prefix} ${rawStyle}` : rawStyle;
+    const prefixedSku =
+      prefixedStyle && item.color && item.size
+        ? `${prefixedStyle}-${item.color}-${item.size}`
+            .replace(/\//g, "-")
+            .replace(/\s+/g, "-")
+            .replace(/-+/g, "-")
+        : item.sku;
+    return {
+      ...item,
+      style: prefixedStyle,
+      sku: prefixedSku,
+    };
+  });
+
+  console.log(`[AIImport:shared] Applied prefix to ${itemsWithPrefix.length} items`);
+
+  // Step 7: Apply variant rules
+  const variantRulesConfigOverride =
+    overrideConfig?.filterZeroStock !== undefined
+      ? {
+          filterZeroStock: overrideConfig.filterZeroStock,
+          filterZeroStockWithFutureDates:
+            overrideConfig?.filterZeroStockWithFutureDates,
+        }
+      : undefined;
+
+  const variantRulesResult = await applyVariantRules(
+    itemsWithPrefix,
+    dataSourceId,
+    variantRulesConfigOverride,
+  );
+
+  console.log(`[AIImport:shared] After variant rules: ${variantRulesResult.items.length} items`);
+
+  // Step 8: Price-based size expansion
+  let priceBasedExpansionCount = 0;
+  let itemsAfterExpansion = variantRulesResult.items;
+  const priceBasedExpansionConfig =
+    overrideConfig?.priceExpansionConfig ||
+    overrideConfig?.priceBasedExpansionConfig ||
+    (dataSource as any).priceBasedExpansionConfig;
+  const sizeLimitConfig =
+    overrideConfig?.sizeLimitConfig || (dataSource as any).sizeLimitConfig;
+
+  if (
+    priceBasedExpansionConfig?.enabled &&
+    (priceBasedExpansionConfig.tiers?.length > 0 ||
+      (priceBasedExpansionConfig.defaultExpandDown ?? 0) > 0 ||
+      (priceBasedExpansionConfig.defaultExpandUp ?? 0) > 0)
+  ) {
+    const shopifyStoreId = (dataSource as any).shopifyStoreId;
+    if (shopifyStoreId) {
+      try {
+        const cacheVariants = await storage.getVariantCacheProductStyles(shopifyStoreId);
+        const stylePriceMap = buildStylePriceMapFromCache(cacheVariants);
+        const expansionResult = applyPriceBasedExpansion(
+          variantRulesResult.items,
+          priceBasedExpansionConfig,
+          stylePriceMap,
+          sizeLimitConfig,
+        );
+        itemsAfterExpansion = expansionResult.items;
+        priceBasedExpansionCount = expansionResult.addedCount;
+        if (priceBasedExpansionCount > 0) {
+          console.log(`[AIImport:shared] Price-based expansion added ${priceBasedExpansionCount} size variants`);
+        }
+      } catch (expansionError) {
+        console.error(`[AIImport:shared] Price-based expansion error:`, expansionError);
+      }
+    }
+  }
+
+  // Step 9: Filter discontinued styles
+  const isSaleFile = (dataSource as any).sourceType === "sales";
+  const linkedSaleDataSourceId = (dataSource as any).assignedSaleDataSourceId;
+  let discontinuedStylesFiltered = 0;
+  let discontinuedItemsRemoved = 0;
+  let itemsToImport = itemsAfterExpansion;
+
+  if (!isSaleFile && linkedSaleDataSourceId) {
+    try {
+      discontinuedItemsRemoved = await removeDiscontinuedInventoryItems(
+        dataSourceId,
+        linkedSaleDataSourceId,
+      );
+      const filterResult = await filterDiscontinuedStyles(
+        dataSourceId,
+        itemsAfterExpansion,
+        linkedSaleDataSourceId,
+      );
+      itemsToImport = filterResult.items;
+      discontinuedStylesFiltered = filterResult.removedCount;
+      if (discontinuedStylesFiltered > 0) {
+        console.log(`[AIImport:shared] Filtered out ${discontinuedStylesFiltered} discontinued items`);
+      }
+    } catch (discontinuedError) {
+      console.error(`[AIImport:shared] Discontinued filtering error:`, discontinuedError);
+    }
+  }
+
+  const processedItems = itemsToImport;
+
+  // Step 10: Create file record
+  const file = await storage.createUploadedFile({
+    dataSourceId,
+    fileName:
+      fileBuffers.length > 1
+        ? `${fileBuffers.length} files consolidated`
+        : primaryFile.originalname,
+    status: "completed",
+    rowCount: processedItems.length,
+    processedAt: new Date(),
+  });
+
+  // Step 11: Calculate stockInfo
+  let stockInfoRule: any = null;
+  try {
+    const stockInfoConfig =
+      overrideConfig?.stockInfoConfig || (dataSource as any).stockInfoConfig;
+
+    const hasStockInfoMessages =
+      stockInfoConfig &&
+      (stockInfoConfig.message1InStock ||
+        stockInfoConfig.message2ExtraSizes ||
+        stockInfoConfig.message3Default ||
+        stockInfoConfig.message4FutureDate);
+
+    if (hasStockInfoMessages) {
+      stockInfoRule = {
+        id: "ai-importer-config",
+        name: "AI Importer Stock Info Config",
+        stockThreshold: 0,
+        inStockMessage: stockInfoConfig.message1InStock || "",
+        sizeExpansionMessage: stockInfoConfig.message2ExtraSizes || null,
+        outOfStockMessage: stockInfoConfig.message3Default || "",
+        futureDateMessage: stockInfoConfig.message4FutureDate || null,
+        dateOffsetDays: stockInfoConfig.dateOffsetDays ?? 0,
+        enabled: true,
+      };
+    } else {
+      const metafieldRules =
+        await storage.getShopifyMetafieldRulesByDataSource(dataSourceId);
+      const activeDbRule = metafieldRules.find((r: any) => r.enabled !== false);
+      if (activeDbRule) {
+        stockInfoRule = {
+          id: activeDbRule.id,
+          name: activeDbRule.name || "Rule Engine Metafield Rule",
+          stockThreshold: activeDbRule.stockThreshold ?? activeDbRule.stock_threshold ?? 0,
+          inStockMessage: activeDbRule.inStockMessage || activeDbRule.in_stock_message || "",
+          sizeExpansionMessage: activeDbRule.sizeExpansionMessage || activeDbRule.size_expansion_message || null,
+          outOfStockMessage: activeDbRule.outOfStockMessage || activeDbRule.out_of_stock_message || "",
+          futureDateMessage: activeDbRule.futureDateMessage || activeDbRule.future_date_message || null,
+          dateOffsetDays: activeDbRule.dateOffsetDays ?? activeDbRule.date_offset_days ?? 0,
+          enabled: true,
+        };
+      }
+    }
+  } catch (ruleError) {
+    console.error(`[AIImport:shared] Failed to get stock info rules:`, ruleError);
+  }
+
+  const calcStockInfo = (item: any): string | null => {
+    if (!stockInfoRule) return null;
+    const stock = item.stock || 0;
+    const shipDate = item.shipDate;
+    const isExpandedSize = item.isExpandedSize || false;
+    const threshold = stockInfoRule.stockThreshold || 0;
+
+    if (isExpandedSize && stockInfoRule.sizeExpansionMessage) {
+      return stockInfoRule.sizeExpansionMessage;
+    }
+    if (shipDate && stockInfoRule.futureDateMessage) {
+      try {
+        const dateStr = String(shipDate).trim();
+        let targetDate: Date;
+        const isoMatch = dateStr.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+        const usMatch = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+        const usShortMatch = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2})$/);
+        if (isoMatch) {
+          targetDate = new Date(parseInt(isoMatch[1]), parseInt(isoMatch[2]) - 1, parseInt(isoMatch[3]));
+        } else if (usMatch) {
+          targetDate = new Date(parseInt(usMatch[3]), parseInt(usMatch[1]) - 1, parseInt(usMatch[2]));
+        } else if (usShortMatch) {
+          targetDate = new Date(2000 + parseInt(usShortMatch[3]), parseInt(usShortMatch[1]) - 1, parseInt(usShortMatch[2]));
+        } else {
+          targetDate = new Date(dateStr);
+        }
+        const offsetDays = stockInfoRule.dateOffsetDays || 0;
+        if (offsetDays !== 0) {
+          targetDate.setDate(targetDate.getDate() + offsetDays);
+        }
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        targetDate.setHours(0, 0, 0, 0);
+        if (targetDate > today) {
+          const formattedDate = targetDate.toLocaleDateString("en-US", {
+            month: "long", day: "numeric", year: "numeric",
+          });
+          return stockInfoRule.futureDateMessage.replace(/\{date\}/gi, formattedDate);
+        }
+      } catch (e) { /* ignore date parse errors */ }
+    }
+    if (stock > threshold) {
+      return stockInfoRule.inStockMessage;
+    }
+    let outOfStockMsg = stockInfoRule.outOfStockMessage;
+    if (outOfStockMsg && outOfStockMsg.includes("{date}")) {
+      outOfStockMsg = outOfStockMsg.replace(/\{date\}/gi, "").replace(/\s+/g, " ").trim();
+    }
+    return outOfStockMsg || null;
+  };
+
+  // Step 12: Map items for saving
+  const itemsToSave = processedItems.map((item: any) => ({
+    dataSourceId,
+    fileId: file.id,
+    sku:
+      item.sku ||
+      `${item.style}-${item.color}-${item.size}`.toUpperCase().replace(/\s+/g, "-"),
+    style: item.style,
+    color: item.color || "",
+    size: item.size || "",
+    stock: item.stock || 0,
+    price: item.price,
+    cost: item.cost,
+    shipDate: item.shipDate,
+    discontinued: item.discontinued || false,
+    isExpandedSize: item.isExpandedSize || false,
+    stockInfo: calcStockInfo(item),
+    rawData: item.rawData || null,
+  }));
+
+  // Step 13: Save to database
+  const updateStrategy = dataSource.updateStrategy || "full_sync";
+  console.log(`[AIImport:shared] Saving ${itemsToSave.length} items (strategy=${updateStrategy})`);
+
+  if (updateStrategy === "replace") {
+    await storage.upsertInventoryItems(itemsToSave, dataSourceId);
+  } else {
+    await storage.deleteInventoryItemsByDataSource(dataSourceId);
+    await storage.createInventoryItems(itemsToSave);
+  }
+
+  await storage.updateDataSource(dataSourceId, { lastSync: new Date() });
+
+  console.log(`[AIImport:shared] DONE: ${itemsToSave.length} items saved for "${dataSource.name}"`);
+
+  return {
+    success: true,
+    itemCount: itemsToSave.length,
+    fileId: file.id,
+    stats: {
+      totalParsed: parseResult.items.length,
+      afterImportRules: importRulesResult.items.length,
+      afterVariantRules: variantRulesResult.items.length,
+      afterPriceExpansion: itemsAfterExpansion.length,
+      afterDiscontinuedFilter: processedItems.length,
+      finalCount: itemsToSave.length,
+      colorsFixed,
+      priceBasedExpansion: priceBasedExpansionCount,
+      discontinuedStylesFiltered,
+      discontinuedItemsRemoved,
+    },
+  };
+}
+
 export default router;
