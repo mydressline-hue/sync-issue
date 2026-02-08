@@ -3472,12 +3472,13 @@ export async function registerRoutes(
             console.log(`[Upload] Auto-detected GRN-INVOICE pivoted format`);
             detectedFormat = "grn_invoice";
           }
-          // Detect PR Date Headers format: has 3+ Excel serial date numbers (4xxxx) as column headers
+          // Detect PR Date Headers format: has 3+ date columns as headers
+          // Supports both Excel serial numbers (4xxxx) and date strings (M/D/YYYY)
           else if (
             (() => {
               const dateHeaders = rawData[0]
                 .map((h: any) => String(h || "").trim())
-                .filter((h: string) => /^4\d{4}$/.test(h));
+                .filter((h: string) => /^4\d{4}$/.test(h) || /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(h));
               return dateHeaders.length >= 3;
             })()
           ) {
