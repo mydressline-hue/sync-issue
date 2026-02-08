@@ -436,7 +436,7 @@ export async function fetchEmailAttachments(
 
       // FIX: After all emails are processed, trigger combine for multi-file sources
       // Previously this was only handled by the scheduler, leaving staged files sitting indefinitely
-      dlLog(`[Email Fetcher] Post-processing: anyFileStagedGlobal=${anyFileStagedGlobal}, anyFileImported=${anyFileImported}`);
+      dlLog(`[Email Fetcher] Post-processing: anyFileStagedGlobal=${anyFileStagedGlobal}, filesProcessed=${result.filesProcessed}`);
       if (anyFileStagedGlobal) {
         dlLog(`[Email Fetcher] Triggering combineAndImportStagedFiles for data source ${dataSourceId}...`);
         try {
