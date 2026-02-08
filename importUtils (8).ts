@@ -4559,13 +4559,21 @@ export function parsePRDateHeaderFormat(
     `[PRDateHeaders] Parsing PR date headers format file for ${dataSourceName || "unknown"}`,
   );
 
-  const workbook = XLSX.read(buffer, { type: "buffer" });
-  const sheet = workbook.Sheets[workbook.SheetNames[0]];
-  const data = XLSX.utils.sheet_to_json(sheet, {
-    header: 1,
-    defval: "",
-    raw: false, // CRITICAL FIX: Consistent raw: false for all parsers
-  }) as any[][];
+  // CRITICAL FIX: Use text-based CSV parser for CSV files to preserve date headers
+  // XLSX.read mangles "2/10/2026" into serial numbers, breaking date column detection
+  let data: any[][];
+  if (isCSVBuffer(buffer)) {
+    console.log(`[PRDateHeaders] Detected CSV - using text parser to preserve date headers`);
+    data = parseCSVAsText(buffer);
+  } else {
+    const workbook = XLSX.read(buffer, { type: "buffer" });
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    data = XLSX.utils.sheet_to_json(sheet, {
+      header: 1,
+      defval: "",
+      raw: false,
+    }) as any[][];
+  }
 
   const items: any[] = [];
   if (data.length < 2) {
@@ -4617,6 +4625,9 @@ export function parsePRDateHeaderFormat(
 
   const headerRow = data[0];
   const headers = headerRow.map((h: any) => String(h ?? "").trim());
+
+  // Log actual headers for debugging date column detection
+  console.log(`[PRDateHeaders] Raw headers (first 20): ${headers.slice(0, 20).join(" | ")}`);
 
   // Find style/product column
   const styleIdx = headers.findIndex(
