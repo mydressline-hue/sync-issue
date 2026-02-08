@@ -2033,7 +2033,7 @@ export async function processEmailAttachment(
     const cleaningConfig = (dataSource.cleaningConfig || {}) as any;
     // FIX: Also stage files when forceStage is true (multiple link/attachment files detected)
     const isMultiFile = forceStage || (dataSource as any).ingestionMode === "multi";
-    const pivotConfig = (dataSource as any).pivotConfig;
+    let pivotConfig = (dataSource as any).pivotConfig;
 
     // Diagnostic logger for email import debugging
     const eLog = (msg: string) => {
@@ -2058,11 +2058,69 @@ export async function processEmailAttachment(
     let items: any[];
     let parserUsed = "unknown";
 
+    // AUTO-DETECT FORMAT from file content (matching manual upload behavior)
+    // If no pivotConfig.format is set, detect from headers just like routes.ts does
+    if (!pivotConfig?.format) {
+      try {
+        const workbook = XLSX.read(buffer, { type: "buffer" });
+        const sheet = workbook.Sheets[workbook.SheetNames[0]];
+        const rawData = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: false }) as any[][];
+        if (rawData.length > 0) {
+          const headerStr = rawData[0].map((h: any) => String(h || "").toUpperCase()).join("|");
+          let detectedFormat: string | null = null;
+
+          if (headerStr.includes("SPECIAL DATE")) {
+            detectedFormat = "sherri_hill";
+          } else if (headerStr.includes("LOCATION") && (headerStr.includes("|00|") || headerStr.includes("|0|"))) {
+            detectedFormat = "jovani";
+          } else if (headerStr.includes("DELIVERY") && headerStr.includes("STYLE") && headerStr.includes("COLOR")) {
+            detectedFormat = "feriani_gia";
+          } else if ((headerStr.match(/\|D\|/g) || []).length >= 3) {
+            detectedFormat = "tarik_ediz";
+          } else if (rawData[0].map((h: any) => String(h || "").toLowerCase()).filter((h: string) => /^ots\d+$/.test(h)).length >= 3) {
+            detectedFormat = "ots_format";
+          } else if (headerStr.includes("STYLE") && (() => {
+            const sizePattern = /\|(000|00|OOO|OO|0|2|4|6|8|10|12|14|16|18|20|22|24|26|28|30)\|/gi;
+            const matches = headerStr.match(sizePattern);
+            return matches && matches.length >= 5;
+          })()) {
+            detectedFormat = "generic_pivot";
+          } else if ((() => {
+            const firstCellUpper = String(rawData[0]?.[0] || "").toUpperCase().trim();
+            if (firstCellUpper.includes("GRN") || firstCellUpper.includes("INVOICE")) return true;
+            if (headerStr.includes("CODE") && headerStr.includes("COLOR")) {
+              const sizePattern = /\|(000|00|0|02|04|06|08|10|12|14|16|18|20|22|24)\|/gi;
+              const matches = headerStr.match(sizePattern);
+              if (matches && matches.length >= 3) return true;
+            }
+            return false;
+          })()) {
+            detectedFormat = "grn_invoice";
+          } else if (rawData[0].map((h: any) => String(h || "").trim()).filter((h: string) => /^4\d{4}$/.test(h) || /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(h)).length >= 3) {
+            detectedFormat = "pr_date_headers";
+          } else if (headerStr.includes("PRODUCT NAME") && headerStr.includes("STYLE") && headerStr.includes("COLOR") && headerStr.includes("SIZE")) {
+            detectedFormat = "store_multibrand";
+          }
+
+          if (detectedFormat) {
+            eLog(`[EmailImport] AUTO-DETECTED format: "${detectedFormat}" from file content`);
+            pivotConfig = { enabled: true, format: detectedFormat };
+            // Save detected format for future imports
+            await storage.updateDataSource(dataSourceId, {
+              formatType: detectedFormat,
+              pivotConfig: { enabled: true, format: detectedFormat },
+            });
+          }
+        }
+      } catch (detectErr: any) {
+        eLog(`[EmailImport] Format auto-detection error (non-fatal): ${detectErr.message}`);
+      }
+    }
+
     // AUTO-DETECT OTS FORMAT: Check if file has ots1, ots2, etc. columns
     // This allows OTS files to be imported without manual configuration
     const isOTS = pivotConfig?.format === "ots_format" || isOTSFormat(buffer);
 
-    // Sherri Hill format
     const isOTSLog = isOTS ? "YES (ots_format)" : "no";
     eLog(`[EmailImport] isOTS=${isOTSLog}, pivotConfig?.format="${pivotConfig?.format}", pivotConfig?.enabled=${pivotConfig?.enabled}`);
 
@@ -2197,6 +2255,7 @@ export async function processEmailAttachment(
         (dataSource as any).discontinuedConfig,
         (dataSource as any).stockValueConfig,
         (dataSource as any).sizeLimitConfig,
+        (dataSource as any).stockInfoConfig?.dateOffsetDays ?? 0,
       );
       headers = result.headers;
       rows = result.rows;
@@ -3101,6 +3160,8 @@ export async function combineAndImportStagedFiles(
         shipDate: ["shipdate", "ship date", "ship_date"],
         futureStock: ["futurestock", "future stock", "future_stock"],
         futureDate: ["futuredate", "future date", "future_date"],
+        incomingStock: ["incomingstock", "incoming stock", "incoming_stock"],
+        discontinued: ["discontinued"],
       };
 
       const autoMapping: any = {};
@@ -3142,6 +3203,7 @@ export async function combineAndImportStagedFiles(
             return colIndex >= 0 ? row[colIndex] : null;
           };
 
+          // === Core fields (always extracted) ===
           let sku = getColValue(columnMapping?.sku || "") || "";
           let style = getColValue(columnMapping?.style || "") || "";
           // FIX: Use ?? instead of || to preserve numeric 0 (valid size like "0" or "00")
@@ -3176,18 +3238,83 @@ export async function combineAndImportStagedFiles(
             stock = isNaN(parsed) ? 0 : parsed;
           }
 
-          return { sku, style, size, color, stock };
+          // === Extended fields (only extracted when present in headers) ===
+          // This matches single-file import behavior so combine doesn't lose data
+          const result: any = { sku, style, size, color, stock };
+
+          // Cost/price
+          if (columnMapping?.cost) {
+            const v = getColValue(columnMapping.cost);
+            if (v != null) result.cost = String(v).replace(/[$,]/g, "").trim() || null;
+          }
+          if (columnMapping?.price) {
+            const v = getColValue(columnMapping.price);
+            if (v != null) result.price = String(v).replace(/[$,]/g, "").trim() || null;
+          }
+
+          // Ship date
+          if (columnMapping?.shipDate) {
+            const v = getColValue(columnMapping.shipDate);
+            if (v != null && v !== "") result.shipDate = String(v).trim() || null;
+          }
+
+          // Incoming stock (from PR date headers parser)
+          if (columnMapping?.incomingStock) {
+            const v = getColValue(columnMapping.incomingStock);
+            if (v != null) {
+              const parsed = parseFloat(String(v).replace(/[^0-9.-]/g, ""));
+              if (!isNaN(parsed)) result.incomingStock = parsed;
+            }
+          }
+
+          // Future stock/date
+          if (columnMapping?.futureStock) {
+            const v = getColValue(columnMapping.futureStock);
+            if (v != null && v !== "") {
+              const parsed = parseFloat(String(v).replace(/[^0-9.-]/g, ""));
+              if (!isNaN(parsed)) result.futureStock = parsed;
+            }
+          }
+          if (columnMapping?.futureDate) {
+            const v = getColValue(columnMapping.futureDate);
+            if (v != null && v !== "") result.futureDate = String(v).trim();
+          }
+
+          // Discontinued flag
+          if (columnMapping?.discontinued) {
+            const v = getColValue(columnMapping.discontinued);
+            if (v != null) {
+              const lower = String(v).toLowerCase().trim();
+              result.discontinued = lower === "yes" || lower === "y" || lower === "true" || lower === "1" || lower === "discontinued";
+            }
+          }
+
+          // Derive hasFutureStock/preserveZeroStock flags (matching single-file behavior)
+          if (result.shipDate || result.futureDate || result.incomingStock > 0) {
+            result.hasFutureStock = true;
+            if (stock === 0) result.preserveZeroStock = true;
+          }
+
+          return result;
         })
         .filter((item: any) => item && item.sku);
 
       cLog(`[Combine] Items extracted from file: ${items.length} (before: allItems had ${allItems.length})`);
       if (items.length === 0 && previewData?.length > 0) {
-        // Log a sample row to debug why no items passed the filter
         const sampleRow = previewData[0];
-        cLog(`[Combine] Sample row[0]: ${JSON.stringify(sampleRow)}`);
-        cLog(`[Combine] SKU mapping: columnMapping.sku="${columnMapping?.sku}", style="${columnMapping?.style}"`);
+        cLog(`[Combine] ZERO ITEMS - Sample row[0]: ${JSON.stringify(sampleRow)}`);
+        cLog(`[Combine] ZERO ITEMS - columnMapping: ${JSON.stringify(columnMapping)}`);
+        cLog(`[Combine] ZERO ITEMS - headers: ${JSON.stringify(headers)}`);
       } else if (items.length > 0) {
         cLog(`[Combine] Sample item[0]: ${JSON.stringify(items[0])}`);
+        // Log if extended fields are present
+        const sample = items[0];
+        const extFields = ['cost','price','shipDate','incomingStock','hasFutureStock','preserveZeroStock','discontinued'].filter(f => sample[f] != null);
+        if (extFields.length > 0) {
+          cLog(`[Combine] Extended fields detected: ${extFields.join(', ')}`);
+        } else {
+          cLog(`[Combine] WARNING: No extended fields found in items (only basic 5 fields)`);
+        }
       }
       // Use concat instead of push(...) to avoid stack overflow with large arrays
       allItems = allItems.concat(items);
@@ -3255,14 +3382,25 @@ export async function combineAndImportStagedFiles(
       cleaningConfig: dataSource.cleaningConfig,
       futureStockConfig: (dataSource as any).futureStockConfig,
     };
+    cLog(`[Combine] prefixedItems count: ${prefixedItems.length}`);
+    if (prefixedItems.length > 0) {
+      cLog(`[Combine] prefixedItems[0]: ${JSON.stringify(prefixedItems[0])}`);
+    }
+
     const importRulesResult = await applyImportRules(
       prefixedItems, // Use prefixed items
       importRulesConfig,
     );
+    cLog(`[Combine] After applyImportRules: ${importRulesResult.items?.length || 0} items`);
+
     const ruleResult = await applyVariantRules(
       importRulesResult.items,
       dataSourceId,
     );
+    cLog(`[Combine] After applyVariantRules: ${ruleResult.items?.length || 0} items`);
+    if (ruleResult.items?.length > 0) {
+      cLog(`[Combine] variantRules sample[0]: ${JSON.stringify(ruleResult.items[0])}`);
+    }
 
     // Check update strategy
     const updateStrategy = (dataSource as any).updateStrategy || "full_sync";
@@ -3350,9 +3488,26 @@ export async function combineAndImportStagedFiles(
           stock: item.stock,
           cost: item.cost,
           price: item.price,
+          // Pass through extended fields to match single-file import behavior
+          shipDate: item.shipDate,
+          hasFutureStock: item.hasFutureStock || false,
+          preserveZeroStock: item.preserveZeroStock || false,
+          discontinued: item.discontinued || false,
+          incomingStock: item.incomingStock,
         };
       })
       .filter((item) => item.sku); // Filter out items without any SKU
+
+    cLog(`[Combine] itemsToCreate count: ${itemsToCreate.length}`);
+    if (itemsToCreate.length > 0) {
+      cLog(`[Combine] itemsToCreate[0]: ${JSON.stringify(itemsToCreate[0])}`);
+      const withFuture = itemsToCreate.filter((i: any) => i.hasFutureStock);
+      const withShipDate = itemsToCreate.filter((i: any) => i.shipDate);
+      const withDiscontinued = itemsToCreate.filter((i: any) => i.discontinued);
+      cLog(`[Combine] Extended field stats: hasFutureStock=${withFuture.length}, shipDate=${withShipDate.length}, discontinued=${withDiscontinued.length}`);
+    } else {
+      cLog(`[Combine] WARNING: itemsToCreate is EMPTY after SKU filter`);
+    }
 
     // Handle discontinued styles based on source type
     const isSaleFile = (dataSource as any).sourceType === "sales";
@@ -4559,21 +4714,13 @@ export function parsePRDateHeaderFormat(
     `[PRDateHeaders] Parsing PR date headers format file for ${dataSourceName || "unknown"}`,
   );
 
-  // CRITICAL FIX: Use text-based CSV parser for CSV files to preserve date headers
-  // XLSX.read mangles "2/10/2026" into serial numbers, breaking date column detection
-  let data: any[][];
-  if (isCSVBuffer(buffer)) {
-    console.log(`[PRDateHeaders] Detected CSV - using text parser to preserve date headers`);
-    data = parseCSVAsText(buffer);
-  } else {
-    const workbook = XLSX.read(buffer, { type: "buffer" });
-    const sheet = workbook.Sheets[workbook.SheetNames[0]];
-    data = XLSX.utils.sheet_to_json(sheet, {
-      header: 1,
-      defval: "",
-      raw: false,
-    }) as any[][];
-  }
+  const workbook = XLSX.read(buffer, { type: "buffer" });
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  const data = XLSX.utils.sheet_to_json(sheet, {
+    header: 1,
+    defval: "",
+    raw: false,
+  }) as any[][];
 
   const items: any[] = [];
   if (data.length < 2) {
