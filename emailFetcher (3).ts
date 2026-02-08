@@ -670,11 +670,15 @@ async function extractLinksFromEmailBody(
     let textContent = "";
 
     for (const part of parts) {
-      dlLog(`[Email Fetcher] MIME part: type=${part.type} subtype=${part.subtype} part=${part.part}`);
-      if (
-        part.type === "text" &&
-        (part.subtype === "html" || part.subtype === "plain")
-      ) {
+      const mimeType = (part.type || "").toLowerCase();
+      const subtype = (part.subtype || "").toLowerCase();
+      dlLog(`[Email Fetcher] MIME part: type=${mimeType} subtype=${subtype} part=${part.part}`);
+
+      // Handle both formats: type="text" + subtype="html" OR type="text/html"
+      const isTextPlain = (mimeType === "text" && subtype === "plain") || mimeType === "text/plain";
+      const isTextHtml = (mimeType === "text" && subtype === "html") || mimeType === "text/html";
+
+      if (isTextPlain || isTextHtml) {
         try {
           const { content } = await client.download(uid.toString(), part.part, {
             uid: true,
@@ -684,7 +688,7 @@ async function extractLinksFromEmailBody(
             chunks.push(chunk);
           }
           const decoded = Buffer.concat(chunks).toString("utf-8");
-          if (part.subtype === "html") {
+          if (isTextHtml) {
             htmlContent = decoded;
             dlLog(`[Email Fetcher] Got HTML body: ${decoded.length} chars`);
           } else {
