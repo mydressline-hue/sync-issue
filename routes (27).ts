@@ -2236,15 +2236,20 @@ function parseExcelToInventory(
 export async function performCombineImport(
   dataSourceId: string,
 ): Promise<{ success: boolean; rowCount: number; error?: string; details?: any }> {
+  console.log(`[performCombineImport] ENTERED for dataSourceId=${dataSourceId}`);
   const dataSource = await storage.getDataSource(dataSourceId);
   if (!dataSource) {
+    console.log(`[performCombineImport] Data source NOT FOUND for id=${dataSourceId}`);
     return { success: false, rowCount: 0, error: "Data source not found" };
   }
+  console.log(`[performCombineImport] Data source found: name="${dataSource.name}", sourceType="${(dataSource as any).sourceType}"`);
 
   const stagedFiles = await storage.getStagedFiles(dataSourceId);
   if (stagedFiles.length === 0) {
+    console.log(`[performCombineImport] No staged files found for dataSourceId=${dataSourceId}`);
     return { success: false, rowCount: 0, error: "No staged files to combine" };
   }
+  console.log(`[performCombineImport] Found ${stagedFiles.length} staged files`);
 
   // Helper function to get prefix for a style
   const getStylePrefix = (style: string): string => {
@@ -2283,6 +2288,8 @@ export async function performCombineImport(
   let allRows: any[][] = [];
   let columnMapping = (dataSource.columnMapping as any) || {};
   const cleaningConfig = (dataSource.cleaningConfig as any) || {};
+  console.log(`[performCombineImport] columnMapping keys: ${JSON.stringify(Object.keys(columnMapping))}, isEmpty: ${!columnMapping || Object.keys(columnMapping).length === 0}`);
+  console.log(`[performCombineImport] cleaningConfig.pivotedFormat: ${JSON.stringify(cleaningConfig?.pivotedFormat || 'none')}`);
 
   // AUTO-DETECT column mapping when empty (needed for email import where
   // pre-parsed files have standard headers like sku, style, color, size, stock
@@ -2320,17 +2327,28 @@ export async function performCombineImport(
 
     if (Object.keys(autoMapping).length > 0) {
       columnMapping = autoMapping;
-      console.log(`[Combine] columnMapping was empty — auto-detected from headers: ${JSON.stringify(columnMapping)}`);
+      console.log(`[performCombineImport] columnMapping was empty — auto-detected from headers: ${JSON.stringify(columnMapping)}`);
+    } else {
+      console.log(`[performCombineImport] WARNING: auto-detect found 0 matching fields from headers`);
     }
+  } else {
+    console.log(`[performCombineImport] columnMapping already has keys: ${JSON.stringify(columnMapping)}`);
   }
+
+  console.log(`[performCombineImport] FINAL columnMapping being used: ${JSON.stringify(columnMapping)}`);
 
   const isJovaniSaleFormat = cleaningConfig?.pivotedFormat?.vendor === "jovani";
   const isSaleFile = (dataSource as any).sourceType === "sales";
+  let fileIndex = 0;
 
   for (const file of stagedFiles) {
     const rows = (file.previewData as any[]) || [];
     const headers = (file.headers as string[]) || [];
     allRows.push(...rows);
+    console.log(`[performCombineImport] File ${fileIndex}: id=${file.id}, rows=${rows.length}, headers=${JSON.stringify(headers)}`);
+    if (rows.length > 0) {
+      console.log(`[performCombineImport] File ${fileIndex} first row (raw): ${JSON.stringify(rows[0])}`);
+    }
 
     const headerIndexMap: Record<string, number> = {};
     headers.forEach((h: string, idx: number) => {
@@ -2341,6 +2359,7 @@ export async function performCombineImport(
       cleaningConfig?.pivotedFormat?.enabled &&
       headerIndexMap["style"] !== undefined &&
       headerIndexMap["size"] !== undefined;
+    console.log(`[performCombineImport] File ${fileIndex}: isPivotedPreParsed=${isPivotedPreParsed}, pivotedFormat.enabled=${cleaningConfig?.pivotedFormat?.enabled}, hasStyle=${headerIndexMap["style"] !== undefined}, hasSize=${headerIndexMap["size"] !== undefined}`);
 
     const getColValue = (row: any[], colName: string) => {
       if (!colName) return null;
@@ -2385,6 +2404,11 @@ export async function performCombineImport(
         shipDateValue = getColValue(row, columnMapping.shipDate);
         futureStockValue = getColValue(row, columnMapping.futureStock);
         futureDateValue = getColValue(row, columnMapping.futureDate);
+      }
+
+      // Diagnostic: log first 3 rows of first file
+      if (fileIndex === 0 && rows.indexOf(row) < 3) {
+        console.log(`[performCombineImport] Row ${rows.indexOf(row)} extracted: style="${style}", sku="${sku}", size="${size}", color="${color}", stock=${stockValue}, path=${isPivotedPreParsed ? 'pivoted' : 'columnMapping'}`);
       }
 
       // Jovani sale file stateful parsing
@@ -2552,6 +2576,15 @@ export async function performCombineImport(
         rawData: { row, headers },
       });
     }
+    fileIndex++;
+  }
+
+  console.log(`[performCombineImport] Total items extracted from all files: ${allItems.length}, totalRows: ${allRows.length}`);
+  if (allItems.length > 0) {
+    console.log(`[performCombineImport] First item sample: ${JSON.stringify({ style: allItems[0].style, sku: allItems[0].sku, size: allItems[0].size, color: allItems[0].color, stock: allItems[0].stock })}`);
+  }
+  if (allItems.length === 0) {
+    console.log(`[performCombineImport] WARNING: 0 items extracted! Check columnMapping and isPivotedPreParsed logic above`);
   }
 
   const updateStrategy = (dataSource as any).updateStrategy || "full_sync";
@@ -2606,7 +2639,9 @@ export async function performCombineImport(
   }
 
   // Step 1: Clean data
+  console.log(`[performCombineImport] Step 1: Cleaning ${allItems.length} items...`);
   const cleanResult = await cleanInventoryData(allItems, dataSource.name);
+  console.log(`[performCombineImport] After clean: ${cleanResult.items.length} items remain`);
 
   // Step 2: Apply import rules
   const importRulesConfig = {
@@ -2626,17 +2661,21 @@ export async function performCombineImport(
     stockValueConfig: (dataSource as any).stockValueConfig,
     complexStockConfig: (dataSource as any).complexStockConfig,
   };
+  console.log(`[performCombineImport] Step 2: Applying import rules...`);
   const importRulesResult = await applyImportRules(
     cleanResult.items,
     importRulesConfig,
     allRows,
   );
+  console.log(`[performCombineImport] After import rules: ${importRulesResult.items.length} items remain`);
 
   // Step 3: Apply variant rules
+  console.log(`[performCombineImport] Step 3: Applying variant rules...`);
   const ruleResult = await applyVariantRules(
     importRulesResult.items,
     dataSourceId,
   );
+  console.log(`[performCombineImport] After variant rules: ${ruleResult.items.length} items remain`);
 
   // Step 4: Price-based size expansion
   let priceBasedExpansionCount = 0;
@@ -2776,6 +2815,7 @@ export async function performCombineImport(
   }
 
   // Step 8: Save to database
+  console.log(`[performCombineImport] Step 8: Saving ${itemsToImport.length} items to database (strategy=${updateStrategy})`);
   let importedCount = 0;
   let addedCount = 0;
   let updatedCount = 0;
@@ -2844,6 +2884,7 @@ export async function performCombineImport(
     ? `imported ${importedCount} items`
     : `added ${addedCount}, updated ${updatedCount} items`;
 
+  console.log(`[performCombineImport] DONE: importedCount=${importedCount}, strategy=${updateStrategy}, filesProcessed=${stagedFiles.length}`);
   return {
     success: true,
     rowCount: importedCount,
