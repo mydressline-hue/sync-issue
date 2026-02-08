@@ -3023,13 +3023,52 @@ export async function combineAndImportStagedFiles(
     // Previously only today's files were processed, orphaning files from previous days
     const filesToProcess = stagedFiles;
 
-    const columnMapping = (dataSource.columnMapping || {}) as any;
+    let columnMapping = (dataSource.columnMapping || {}) as any;
     const cleaningConfig = (dataSource.cleaningConfig || {}) as any;
 
     const cLog = (msg: string) => {
       const line = `[${new Date().toISOString()}] ${msg}\n`;
       try { fs.appendFileSync("/tmp/email_download.log", line); } catch {}
     };
+
+    // Auto-detect standard column names when columnMapping is empty
+    // This handles pre-parsed files (e.g. from pivot parser) where headers
+    // already contain standard names like sku, style, color, size, stock
+    if (!columnMapping || Object.keys(columnMapping).length === 0) {
+      const firstFile = filesToProcess[0];
+      const firstHeaders = (firstFile?.headers as string[]) || [];
+      const lowerHeaders = firstHeaders.map((h: string) => (h || "").toLowerCase().trim());
+
+      const standardFields: Record<string, string[]> = {
+        sku: ["sku"],
+        style: ["style"],
+        color: ["color"],
+        size: ["size"],
+        stock: ["stock", "quantity", "qty"],
+        cost: ["cost"],
+        price: ["price"],
+        shipDate: ["shipdate", "ship date", "ship_date"],
+        futureStock: ["futurestock", "future stock", "future_stock"],
+        futureDate: ["futuredate", "future date", "future_date"],
+      };
+
+      const autoMapping: any = {};
+      for (const [field, aliases] of Object.entries(standardFields)) {
+        for (const alias of aliases) {
+          const idx = lowerHeaders.indexOf(alias);
+          if (idx >= 0) {
+            autoMapping[field] = firstHeaders[idx];
+            break;
+          }
+        }
+      }
+
+      if (Object.keys(autoMapping).length > 0) {
+        columnMapping = autoMapping;
+        cLog(`[Combine] columnMapping was empty - auto-detected from headers: ${JSON.stringify(columnMapping)}`);
+      }
+    }
+
     cLog(`[Combine] columnMapping: ${JSON.stringify(columnMapping)}`);
     cLog(`[Combine] Staged files to process: ${filesToProcess.length}`);
 
