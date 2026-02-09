@@ -1329,6 +1329,7 @@ function parseStoreMultibrandFormat(
     items.push({ style, color: color || "DEFAULT", size, stock, price, brand });
   }
 
+  console.log(`[StoreMultibrand] vendorIdx=${vendorIdx}, sample brands: ${items.slice(0, 3).map(i => i.brand || 'NONE').join(', ')}, total=${items.length}`);
   return items;
 }
 
@@ -2148,6 +2149,8 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
 
     // Apply prefix to all items
     // If item has a brand (from store_multibrand vendor column), use brand as prefix
+    const firstItem = itemsWithMappedColors[0];
+    console.log(`[AIImport] PREFIX DEBUG: first item brand="${firstItem?.brand}", style="${firstItem?.style}", keys=${firstItem ? Object.keys(firstItem).join(',') : 'none'}`);
     const itemsWithPrefix = itemsWithMappedColors.map((item: any) => {
       const rawStyle = String(item.style || "").trim();
       const prefix = item.brand
