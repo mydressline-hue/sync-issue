@@ -320,6 +320,21 @@ function autoDetectPivotFormat(
     return "generic_pivot";
   }
 
+  // Store Multibrand: row format with a vendor/brand column + style + color + size
+  const hasVendorCol = headersLower.some(
+    (h: string) =>
+      h === "vendor" || h === "brand" || h === "designer" ||
+      h === "manufacturer" || h === "vendor name" || h === "brand name",
+  );
+  const hasStyleCol = headersLower.some(
+    (h: string) => h.includes("style") || h === "item" || h === "code",
+  );
+  const hasColorCol = headersLower.some((h: string) => h.includes("color"));
+  const hasSizeCol = headersLower.some((h: string) => h.includes("size"));
+  if (hasVendorCol && hasStyleCol && hasColorCol && hasSizeCol) {
+    return "store_multibrand";
+  }
+
   return null;
 }
 
@@ -1228,6 +1243,12 @@ function parseStoreMultibrandFormat(
   const productNameIdx = headersLower.findIndex(
     (h: string) => h.includes("product") && h.includes("name"),
   );
+  // Direct vendor/brand column (e.g., "Vendor", "Brand", "Designer")
+  const vendorIdx = headersLower.findIndex(
+    (h: string) =>
+      h === "vendor" || h === "brand" || h === "designer" ||
+      h === "manufacturer" || h === "vendor name" || h === "brand name",
+  );
   const styleIdx = resolveColumnIndex(config, headersLower, "style", ["style"]);
   const colorIdx = resolveColumnIndex(config, headersLower, "color", ["color"]);
   const sizeIdx = resolveColumnIndex(config, headersLower, "size", ["size"]);
@@ -1289,7 +1310,13 @@ function parseStoreMultibrandFormat(
         : undefined;
 
     let brand: string | undefined;
-    if (productName) {
+    // Priority 1: Direct vendor/brand column (e.g., "Jovani" in Column A)
+    if (vendorIdx >= 0) {
+      const vendorVal = String(row[vendorIdx] ?? "").trim();
+      if (vendorVal) brand = vendorVal;
+    }
+    // Priority 2: Extract brand from product name by matching known brands
+    if (!brand && productName) {
       const nameLower = productName.toLowerCase();
       for (const b of knownBrands) {
         if (nameLower.includes(b.toLowerCase())) {
@@ -2120,9 +2147,12 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
     };
 
     // Apply prefix to all items
+    // If item has a brand (from store_multibrand vendor column), use brand as prefix
     const itemsWithPrefix = itemsWithMappedColors.map((item: any) => {
       const rawStyle = String(item.style || "").trim();
-      const prefix = rawStyle ? getStylePrefixForAI(rawStyle) : dataSource.name;
+      const prefix = item.brand
+        ? String(item.brand).trim()
+        : rawStyle ? getStylePrefixForAI(rawStyle) : dataSource.name;
       const prefixedStyle = rawStyle ? `${prefix} ${rawStyle}` : rawStyle;
       // Rebuild SKU with prefixed style
       const prefixedSku =
@@ -4106,9 +4136,12 @@ export async function executeAIImport(
     return prefix;
   };
 
+  // If item has a brand (from store_multibrand vendor column), use brand as prefix
   const itemsWithPrefix = itemsWithMappedColors.map((item: any) => {
     const rawStyle = String(item.style || "").trim();
-    const prefix = rawStyle ? getStylePrefixForAI(rawStyle) : dataSource.name;
+    const prefix = item.brand
+      ? String(item.brand).trim()
+      : rawStyle ? getStylePrefixForAI(rawStyle) : dataSource.name;
     const prefixedStyle = rawStyle ? `${prefix} ${rawStyle}` : rawStyle;
     const prefixedSku =
       prefixedStyle && item.color && item.size
