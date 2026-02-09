@@ -707,6 +707,7 @@ function parseTarikEdizFormat(
     }
 
     // Data rows: "D" for current inventory OR date string for future ship dates
+    // NOTE: In Tarik Ediz format, "D" means CURRENT STOCK (not discontinued)
     const isCurrentStock = firstCell === "D";
     const isFutureShipDate = isDateString(firstCell);
     const isSerialDate = isExcelSerialDate(row[0]);
@@ -742,7 +743,7 @@ function parseTarikEdizFormat(
             size: sh.size,
             stock: stockNum,
             price,
-            discontinued: isCurrentStock,
+            // "D" = current stock, NOT discontinued. Do not set discontinued flag.
             shipDate: shipDate || undefined,
           };
 
