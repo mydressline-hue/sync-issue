@@ -2399,15 +2399,16 @@ export async function processEmailAttachment(
         }
       }
 
-      // DEFAULT SAFETY CHECK: Block if row count drops by more than 90% from last import
-      // This catches completely corrupted files even without explicit tolerance config
+      // DEFAULT SAFETY CHECK: Block if row count drops by more than 50% from last import
+      // This catches corrupted files or parser failures even without explicit tolerance config
       // SKIP for multi-file sources: individual files are always smaller than combined total
       if (
-        lastRowCount > 100 &&
-        actualRowCount < lastRowCount * 0.1 &&
+        lastRowCount > 20 &&
+        actualRowCount < lastRowCount * 0.5 &&
         !isMultiFile
       ) {
-        const errorMessage = `SAFETY BLOCK: File appears corrupted - row count dropped from ${lastRowCount} to ${actualRowCount} (>90% decrease). Import blocked to protect your data.`;
+        const dropPercent = Math.round(((lastRowCount - actualRowCount) / lastRowCount) * 100);
+        const errorMessage = `SAFETY BLOCK: Item count dropped ${dropPercent}% (from ${lastRowCount} to ${actualRowCount}). Import blocked to protect your data.`;
         await logSystemError(
           dataSourceId,
           "row_count_error",

@@ -354,6 +354,7 @@ export function parseIntelligentPivotFormat(
   const rawData = XLSX.utils.sheet_to_json(sheet, {
     header: 1,
     defval: "",
+    raw: false, // Force all values to strings for consistent date/number handling across parsers
   }) as any[][];
 
   const skipRows = config.skipRows || 0;
@@ -626,73 +627,142 @@ function parseTarikEdizFormat(
   const items: PivotItem[] = [];
   if (data.length < 5) return items;
 
-  let dataStartIdx = 0;
-  const stylePattern = /^\d{2}[A-Z]{2,}/i;
-
-  for (let i = 0; i < Math.min(15, data.length); i++) {
-    const cell = String(data[i]?.[0] || "").trim();
-    if (stylePattern.test(cell) || cell === "D" || cell === "01") {
-      dataStartIdx = i;
-      break;
-    }
-  }
-
   // For price: check if a header row exists before data
   let priceIdx = -1;
-  if (dataStartIdx > 0) {
-    const possibleHeaders = data[0].map((h: any) => String(h || "").toLowerCase().trim());
-    priceIdx = resolveColumnIndex(config, possibleHeaders, "price", [
-      "price", "wholesale", "cost", "msrp", "line price",
-    ]);
-  }
 
-  const sizePattern = /^(0|2|4|6|8|10|12|14|16|18|20|22|24)$/;
+  // Helper to detect if first cell is a date (DD/MM/YYYY or similar)
+  const isDateString = (val: string): boolean => {
+    return (
+      /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(val) ||
+      /^\d{4}-\d{2}-\d{2}$/.test(val) ||
+      /^\d{1,2}-\d{1,2}-\d{4}$/.test(val)
+    );
+  };
+
+  // Helper to detect Excel serial date numbers (dates stored as raw numbers)
+  const isExcelSerialDate = (val: any): boolean => {
+    if (typeof val !== "number") return false;
+    // Excel serial dates for years 2020-2035 range from ~43831 to ~49400
+    return val > 43000 && val < 50000;
+  };
+
+  // Helper to convert Excel serial number to ISO date string
+  const excelSerialToISO = (serial: number): string => {
+    // Excel epoch is Jan 1, 1900 (with the Lotus 1-2-3 leap year bug)
+    const excelEpoch = new Date(1899, 11, 30);
+    const date = new Date(excelEpoch.getTime() + serial * 86400000);
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, "0");
+    const d = String(date.getDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  };
+
+  // Helper to parse date string to ISO format
+  const parseDateToISO = (val: string): string | null => {
+    const ddmmyyyy = val.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (ddmmyyyy) {
+      const [, day, month, year] = ddmmyyyy;
+      return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+    }
+    if (/^\d{4}-\d{2}-\d{2}$/.test(val)) return val;
+    return null;
+  };
+
+  // Find style header rows and data start
+  // Style header rows: have size numbers in columns 13+ and product name in column 7
   let currentStyle = "";
-  let currentSizeHeaders: string[] = [];
+  let sizeHeaders: { index: number; size: string }[] = [];
 
-  for (let rowIdx = dataStartIdx; rowIdx < data.length; rowIdx++) {
-    const row = data[rowIdx];
-    if (!row || row.length < 5) continue;
+  for (let i = 0; i < data.length; i++) {
+    const row = data[i];
+    if (!row || row.length === 0) continue;
 
-    const cell0 = String(row[0] ?? "").trim();
+    const firstCell = String(row[0] ?? "").trim();
 
-    if (stylePattern.test(cell0) || /^\d{5,}$/.test(cell0)) {
-      currentStyle = cell0;
-      currentSizeHeaders = [];
-      for (let i = 13; i < Math.min(30, row.length); i++) {
-        const h = String(row[i] ?? "").trim();
-        if (sizePattern.test(h)) currentSizeHeaders.push(h);
+    // Price column detection from header-like rows
+    if (i < 15 && priceIdx < 0 && row.length > 5) {
+      const possibleHeaders = row.map((h: any) => String(h || "").toLowerCase().trim());
+      priceIdx = resolveColumnIndex(config, possibleHeaders, "price", [
+        "price", "wholesale", "cost", "msrp", "line price",
+      ]);
+    }
+
+    // Style header detection: column 13 has a number (size) AND column 7 exists (product name)
+    // OR style pattern like "98XX..." in first cell
+    const stylePattern = /^\d{2}[A-Z]{2,}/i;
+    const col13val = row[13] !== null && row[13] !== undefined ? String(row[13]).trim() : "";
+    const isStyleRow = (col13val.match(/^\d+$/) && row[7]) || stylePattern.test(firstCell) || /^\d{5,}$/.test(firstCell);
+
+    if (isStyleRow && !firstCell.match(/^D$/i) && !isDateString(firstCell) && !isExcelSerialDate(row[0])) {
+      currentStyle = firstCell;
+
+      // Extract size headers from this row (any non-empty value in cols 13+)
+      sizeHeaders = [];
+      for (let j = 13; j < row.length; j++) {
+        if (row[j] !== null && row[j] !== undefined && row[j] !== "") {
+          sizeHeaders.push({ index: j, size: String(row[j]) });
+        }
       }
       continue;
     }
 
-    const isDiscontinued = cell0 === "D";
-    if (!currentStyle || currentSizeHeaders.length === 0) continue;
+    // Data rows: "D" for current inventory OR date string for future ship dates
+    const isCurrentStock = firstCell === "D";
+    const isFutureShipDate = isDateString(firstCell);
+    const isSerialDate = isExcelSerialDate(row[0]);
 
-    const colorVal = String(row[11] ?? row[3] ?? "").trim();
-    if (!colorVal) continue;
+    if ((isCurrentStock || isFutureShipDate || isSerialDate) && row[11] && currentStyle) {
+      const color = String(row[11]).trim();
+      let shipDate: string | null = null;
 
-    const price =
-      priceIdx >= 0
-        ? parseFloat(String(row[priceIdx] || "0")) || undefined
-        : undefined;
+      if (isFutureShipDate) {
+        shipDate = parseDateToISO(firstCell);
+      } else if (isSerialDate) {
+        shipDate = excelSerialToISO(row[0] as number);
+      }
 
-    for (let i = 0; i < currentSizeHeaders.length; i++) {
-      const stock = parseStockValue(
-        row[13 + i],
-        config.stockConfig?.textMappings,
-      );
-      items.push({
-        style: currentStyle,
-        color: colorVal,
-        size: currentSizeHeaders[i],
-        stock,
-        price,
-        discontinued: isDiscontinued,
-      });
+      const price =
+        priceIdx >= 0
+          ? parseFloat(String(row[priceIdx] || "0")) || undefined
+          : undefined;
+
+      // Extract stock values for each size
+      for (const sh of sizeHeaders) {
+        const stockRaw = row[sh.index];
+        const stockNum =
+          stockRaw !== null && stockRaw !== undefined && !isNaN(Number(stockRaw))
+            ? Number(stockRaw)
+            : 0;
+
+        // Include ALL items: stock > 0 OR has future ship date
+        if (stockNum > 0 || shipDate) {
+          const item: any = {
+            style: currentStyle,
+            color,
+            size: sh.size,
+            stock: stockNum,
+            price,
+            discontinued: isCurrentStock,
+            shipDate: shipDate || undefined,
+          };
+
+          // Set future stock flags (critical for downstream processing)
+          if (shipDate) {
+            item.hasFutureStock = true;
+            if (stockNum === 0) {
+              item.preserveZeroStock = true;
+            }
+          }
+
+          items.push(item);
+        }
+      }
     }
   }
 
+  console.log(
+    `[TarikEdiz] Parsed ${items.length} items (including future ship date items)`,
+  );
   return items;
 }
 
