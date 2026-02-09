@@ -225,6 +225,16 @@ export async function fetchEmailAttachments(
       const successfulUids = new Set<number>();
       let anyFileStagedGlobal = false;
       const collectedBuffers: { buffer: Buffer; originalname: string }[] = [];
+      // Track deferred log entries for multi-file mode — logs are created AFTER executeAIImport
+      // to avoid marking files as "success" before the import actually runs
+      const deferredLogEntries: Array<{
+        emailFrom: string;
+        emailSubject: string;
+        emailDate: Date | null;
+        fileName: string;
+        fileHash: string;
+      }> = [];
+      const collectedHashes = new Set<string>(); // In-memory dedup for multi-file collection
 
       // Process all emails from whitelisted senders
       for (const msgInfo of allWhitelistedMessages) {
@@ -323,31 +333,32 @@ export async function fetchEmailAttachments(
                 // Multi-file mode: collect raw buffers for executeAIImport
                 // instead of staging files individually via processEmailAttachment
                 if (forceStageMultiple) {
+                  // In-memory dedup: skip if we already collected this file hash in this run
+                  if (collectedHashes.has(fileHash)) {
+                    result.logs.push({
+                      emailFrom: from,
+                      emailSubject: subject,
+                      fileName: attachment.filename,
+                      status: "skipped",
+                      error: "Duplicate file within same fetch cycle",
+                    });
+                    continue;
+                  }
+
                   collectedBuffers.push({ buffer: attachment.content, originalname: attachment.filename });
+                  collectedHashes.add(fileHash);
                   dlLog(`[Email Fetcher] Collected buffer for ${attachment.filename} (${attachment.content.length} bytes) - will use executeAIImport`);
 
-                  await storage.createEmailFetchLog({
-                    dataSourceId,
+                  // DEFERRED: Don't create log until executeAIImport completes
+                  // This prevents marking files as "success" before import actually runs
+                  deferredLogEntries.push({
                     emailFrom: from,
                     emailSubject: subject,
                     emailDate: emailDate || null,
                     fileName: attachment.filename,
                     fileHash,
-                    rowCount: 0,
-                    status: "success",
-                    errorMessage: null,
                   });
 
-                  result.filesProcessed++;
-                  result.logs.push({
-                    emailFrom: from,
-                    emailSubject: subject,
-                    fileName: attachment.filename,
-                    status: "success",
-                  });
-                  if (emailDate) {
-                    lastSuccessfulEmailDate = emailDate;
-                  }
                   anyFileStaged = true;
                   continue;
                 }
@@ -452,7 +463,7 @@ export async function fetchEmailAttachments(
               successfulUids.add(uid);
               anyFileStagedGlobal = true;
               console.log(
-                `[Email Fetcher] ${result.filesProcessed} file(s) staged for ${from}, sync deferred to combine step`,
+                `[Email Fetcher] File(s) collected from ${from}, import deferred to executeAIImport`,
               );
             }
           }
@@ -469,13 +480,57 @@ export async function fetchEmailAttachments(
 
       // FIX: After all emails are processed, trigger combine for multi-file sources
       // Previously this was only handled by the scheduler, leaving staged files sitting indefinitely
-      dlLog(`[Email Fetcher] Post-processing: anyFileStagedGlobal=${anyFileStagedGlobal}, filesProcessed=${result.filesProcessed}`);
+      dlLog(`[Email Fetcher] Post-processing: anyFileStagedGlobal=${anyFileStagedGlobal}, collectedBuffers=${collectedBuffers.length}, deferredLogs=${deferredLogEntries.length}`);
       if (anyFileStagedGlobal && collectedBuffers.length > 0) {
         dlLog(`[Email Fetcher] Calling executeAIImport with ${collectedBuffers.length} collected buffers for data source ${dataSourceId}...`);
         try {
           const importResult = await executeAIImport(collectedBuffers, dataSourceId);
           dlLog(`[Email Fetcher] executeAIImport result: success=${importResult.success}, itemCount=${importResult.itemCount}, error=${importResult.error || 'none'}`);
+
+          const importStatus = importResult.success ? "success" : "error";
+          const importError = importResult.error || null;
+
+          // CLEANUP: Delete old accumulated logs before creating fresh ones
+          // This prevents indefinite log growth from daily scheduled imports
+          try {
+            const deletedCount = await storage.deleteEmailFetchLogs(dataSourceId);
+            if (deletedCount > 0) {
+              dlLog(`[Email Fetcher] Cleaned up ${deletedCount} old email fetch logs`);
+            }
+          } catch (cleanupErr: any) {
+            dlLog(`[Email Fetcher] Warning: Failed to cleanup old logs: ${cleanupErr.message}`);
+          }
+
+          // Create logs for all collected files with the ACTUAL import result
+          for (const entry of deferredLogEntries) {
+            try {
+              await storage.createEmailFetchLog({
+                dataSourceId,
+                emailFrom: entry.emailFrom,
+                emailSubject: entry.emailSubject,
+                emailDate: entry.emailDate,
+                fileName: entry.fileName,
+                fileHash: entry.fileHash,
+                rowCount: importResult.success ? (importResult.itemCount || 0) : 0,
+                status: importStatus,
+                errorMessage: importError,
+              });
+            } catch (logErr: any) {
+              dlLog(`[Email Fetcher] Warning: Failed to create log for ${entry.fileName}: ${logErr.message}`);
+            }
+          }
+
           if (importResult.success) {
+            result.filesProcessed = deferredLogEntries.length;
+            for (const entry of deferredLogEntries) {
+              result.logs.push({
+                emailFrom: entry.emailFrom,
+                emailSubject: entry.emailSubject,
+                fileName: entry.fileName,
+                status: "success",
+              });
+            }
+
             dlLog(`[Email Fetcher] Import successful: ${importResult.itemCount} items imported`);
             if (importResult.stats) {
               dlLog(`[Email Fetcher] Stats: ${JSON.stringify(importResult.stats)}`);
@@ -490,10 +545,45 @@ export async function fetchEmailAttachments(
               dlLog(`[Email Fetcher] Error triggering Shopify sync after import: ${err.message}`);
             });
           } else {
+            for (const entry of deferredLogEntries) {
+              result.logs.push({
+                emailFrom: entry.emailFrom,
+                emailSubject: entry.emailSubject,
+                fileName: entry.fileName,
+                status: "error",
+                error: importResult.error,
+              });
+              result.errors.push(`Failed to import ${entry.fileName}: ${importResult.error}`);
+            }
             dlLog(`[Email Fetcher] Import FAILED: ${importResult.error}`);
           }
         } catch (importErr: any) {
           dlLog(`[Email Fetcher] EXCEPTION in executeAIImport: ${importErr.message}\n${importErr.stack}`);
+
+          // Log the failure for all deferred entries so they can be retried next run
+          for (const entry of deferredLogEntries) {
+            try {
+              await storage.createEmailFetchLog({
+                dataSourceId,
+                emailFrom: entry.emailFrom,
+                emailSubject: entry.emailSubject,
+                emailDate: entry.emailDate,
+                fileName: entry.fileName,
+                fileHash: entry.fileHash,
+                rowCount: 0,
+                status: "error",
+                errorMessage: importErr.message,
+              });
+            } catch {}
+            result.logs.push({
+              emailFrom: entry.emailFrom,
+              emailSubject: entry.emailSubject,
+              fileName: entry.fileName,
+              status: "error",
+              error: importErr.message,
+            });
+            result.errors.push(`Failed to import ${entry.fileName}: ${importErr.message}`);
+          }
         }
       } else {
         dlLog(`[Email Fetcher] No files collected for multi-file import - skipping`);
