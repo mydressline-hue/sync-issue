@@ -100,6 +100,7 @@ import {
   applyImportRules,
   applyPriceBasedExpansion,
   buildStylePriceMapFromCache,
+  deduplicateAndZeroFutureStock,
 } from "./inventoryProcessing";
 import { startImport, completeImport, failImport } from "./importState";
 import { registerGlobalValidatorRoutes } from "./globalValidator";
@@ -2845,6 +2846,11 @@ export async function performCombineImport(
     console.log(`[Combine] Applied sale pricing: ${priceMultiplierForSale}x multiplier, ${shopifyPricesLoaded} compare-at prices set`);
   }
 
+  // Step 6.5: Dedup by style-color-size and zero out stock for future ship dates
+  const dedupOffsetCombine = (dataSource as any).stockInfoConfig?.dateOffsetDays ?? 0;
+  const dedupResultCombine = deduplicateAndZeroFutureStock(itemsToImport, dedupOffsetCombine);
+  itemsToImport = dedupResultCombine.items;
+
   // Step 7: Calculate stockInfo
   const stockInfoRuleCombine = await getStockInfoRule(dataSource, storage);
   if (stockInfoRuleCombine) {
@@ -4642,8 +4648,13 @@ export async function registerRoutes(
           }
         }
 
+        // Dedup by style-color-size and zero out stock for future ship dates
+        const dedupOffset = (dataSource as any).stockInfoConfig?.dateOffsetDays ?? 0;
+        const dedupResult = deduplicateAndZeroFutureStock(step05FilteredItems, dedupOffset);
+        const dedupedUploadItems = dedupResult.items;
+
         // Import inventory items - prefix style AND sku with custom prefix or data source name
-        const inventoryItems = step05FilteredItems.map((item: any) => {
+        const inventoryItems = dedupedUploadItems.map((item: any) => {
           const prefix = item.style
             ? getStylePrefix(item.style)
             : dataSource.name;
@@ -5806,6 +5817,11 @@ export async function registerRoutes(
       // ============================================================
       // CALCULATE STOCK INFO FOR EACH ITEM
       // ============================================================
+      // Dedup by style-color-size and zero out stock for future ship dates
+      const dedupOffsetUrl = (dataSource as any).stockInfoConfig?.dateOffsetDays ?? 0;
+      const dedupResultUrl = deduplicateAndZeroFutureStock(itemsAfterExpansion, dedupOffsetUrl);
+      itemsAfterExpansion = dedupResultUrl.items;
+
       const stockInfoRuleUrl = await getStockInfoRule(dataSource, storage);
       if (stockInfoRuleUrl) {
         console.log(
@@ -6378,6 +6394,11 @@ export async function registerRoutes(
       // ============================================================
       // CALCULATE STOCK INFO FOR EACH ITEM
       // ============================================================
+      // Dedup by style-color-size and zero out stock for future ship dates
+      const dedupOffsetReimport = (dataSource as any).stockInfoConfig?.dateOffsetDays ?? 0;
+      const dedupResultReimport = deduplicateAndZeroFutureStock(itemsAfterExpansion, dedupOffsetReimport);
+      itemsAfterExpansion = dedupResultReimport.items;
+
       const stockInfoRuleReimport = await getStockInfoRule(dataSource, storage);
       if (stockInfoRuleReimport) {
         console.log(

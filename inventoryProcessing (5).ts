@@ -533,6 +533,152 @@ export async function cleanInventoryData(
   };
 }
 
+/**
+ * Deduplicates items by style-color-size and zeroes out stock for future ship dates.
+ *
+ * 1. Any item with a future ship date (shipDate + offsetDays > today) gets stock=0
+ * 2. Duplicate style-color-size items are collapsed to 1:
+ *    - Prefer item with highest stock (current inventory)
+ *    - If all stock=0: keep the one with the closest future ship date
+ *
+ * Called from ALL import paths (manual, email, URL, combine).
+ */
+export function deduplicateAndZeroFutureStock(
+  items: any[],
+  dateOffsetDays: number = 0,
+): { items: any[]; duplicatesRemoved: number; stockZeroed: number } {
+  if (!items || items.length === 0) {
+    return { items: [], duplicatesRemoved: 0, stockZeroed: 0 };
+  }
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  let stockZeroed = 0;
+
+  function parseShipDate(shipDate: any): Date | null {
+    if (!shipDate) return null;
+    try {
+      const dateStr = String(shipDate).trim().toLowerCase();
+      if (!dateStr || dateStr === "n/a" || dateStr === "na" || dateStr === "tbd" || dateStr === "none") return null;
+
+      const isoMatch = dateStr.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+      const usMatch = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+      const usShortMatch = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2})$/);
+
+      let d: Date;
+      if (isoMatch) {
+        d = new Date(parseInt(isoMatch[1]), parseInt(isoMatch[2]) - 1, parseInt(isoMatch[3]));
+      } else if (usMatch) {
+        d = new Date(parseInt(usMatch[3]), parseInt(usMatch[1]) - 1, parseInt(usMatch[2]));
+      } else if (usShortMatch) {
+        d = new Date(2000 + parseInt(usShortMatch[3]), parseInt(usShortMatch[1]) - 1, parseInt(usShortMatch[2]));
+      } else {
+        d = new Date(dateStr);
+      }
+      if (isNaN(d.getTime())) return null;
+      d.setHours(0, 0, 0, 0);
+      return d;
+    } catch {
+      return null;
+    }
+  }
+
+  function isFutureWithOffset(shipDate: any): boolean {
+    const parsed = parseShipDate(shipDate);
+    if (!parsed) return false;
+    const adjusted = new Date(parsed);
+    adjusted.setDate(adjusted.getDate() + dateOffsetDays);
+    return adjusted > today;
+  }
+
+  // Step A: Zero out stock for items with future ship dates (respecting offset)
+  const processedItems = items.map((item) => {
+    if (!item.shipDate) return item;
+    if (isFutureWithOffset(item.shipDate)) {
+      const currentStock = typeof item.stock === "number" ? item.stock : parseInt(item.stock) || 0;
+      if (currentStock > 0) stockZeroed++;
+      return { ...item, stock: 0 };
+    }
+    return item;
+  });
+
+  // Step B: Dedup by style-color-size — keep 1 variant per key
+  const groups = new Map<string, any[]>();
+  for (const item of processedItems) {
+    const key = `${(item.style || "").toLowerCase()}|${(item.color || "").toLowerCase()}|${String(item.size || "").toLowerCase()}`;
+    const group = groups.get(key);
+    if (group) {
+      group.push(item);
+    } else {
+      groups.set(key, [item]);
+    }
+  }
+
+  const dedupedItems: any[] = [];
+  for (const [, group] of groups) {
+    if (group.length === 1) {
+      dedupedItems.push(group[0]);
+      continue;
+    }
+
+    // Multiple items for same style-color-size
+    // Prefer items with stock > 0 (current/arrived inventory)
+    const withStock = group.filter((item) => {
+      const stock = typeof item.stock === "number" ? item.stock : parseInt(item.stock) || 0;
+      return stock > 0;
+    });
+
+    if (withStock.length > 0) {
+      // Keep highest stock item
+      let best = withStock[0];
+      for (let i = 1; i < withStock.length; i++) {
+        const bestStock = typeof best.stock === "number" ? best.stock : parseInt(best.stock) || 0;
+        const curStock = typeof withStock[i].stock === "number" ? withStock[i].stock : parseInt(withStock[i].stock) || 0;
+        if (curStock > bestStock) best = withStock[i];
+      }
+      dedupedItems.push(best);
+      continue;
+    }
+
+    // All stock=0 — keep the one with closest future ship date
+    const withFutureDates = group.filter((item) => isFutureWithOffset(item.shipDate));
+
+    if (withFutureDates.length > 0) {
+      withFutureDates.sort((a, b) => {
+        const aDate = parseShipDate(a.shipDate)!;
+        const bDate = parseShipDate(b.shipDate)!;
+        return aDate.getTime() - bDate.getTime(); // Earliest first = closest
+      });
+      dedupedItems.push(withFutureDates[0]);
+      continue;
+    }
+
+    // No future dates — keep most recent past date, or first if no dates
+    const withAnyDates = group.filter((item) => parseShipDate(item.shipDate) !== null);
+    if (withAnyDates.length > 0) {
+      withAnyDates.sort((a, b) => {
+        const aDate = parseShipDate(a.shipDate)!;
+        const bDate = parseShipDate(b.shipDate)!;
+        return bDate.getTime() - aDate.getTime(); // Most recent first
+      });
+      dedupedItems.push(withAnyDates[0]);
+      continue;
+    }
+
+    // No dates at all — keep first
+    dedupedItems.push(group[0]);
+  }
+
+  const duplicatesRemoved = processedItems.length - dedupedItems.length;
+  if (duplicatesRemoved > 0 || stockZeroed > 0) {
+    console.log(
+      `[Dedup] ${processedItems.length} → ${dedupedItems.length} items (${duplicatesRemoved} duplicates removed, ${stockZeroed} future items stock zeroed, offset=${dateOffsetDays} days)`,
+    );
+  }
+
+  return { items: dedupedItems, duplicatesRemoved, stockZeroed };
+}
+
 export async function applyVariantRules(
   items: any[],
   dataSourceId: string,

@@ -40,6 +40,7 @@ import {
   buildStylePriceMapFromCache,
   formatColorName,
   isValidShipDate,
+  deduplicateAndZeroFutureStock,
 } from "./inventoryProcessing";
 import {
   filterDiscontinuedStyles,
@@ -1732,17 +1733,7 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
     if (!dataSource)
       return res.status(404).json({ error: "Data source not found" });
 
-    // DEBUG: Log stockInfoConfig from BOTH sources
     console.log(`[AIImport] Loaded dataSource "${dataSource.name}"`);
-    console.log(
-      `[AIImport]   - DB stockInfoConfig: ${(dataSource as any).stockInfoConfig ? JSON.stringify((dataSource as any).stockInfoConfig) : "NULL"}`,
-    );
-    console.log(
-      `[AIImport]   - overrideConfig.stockInfoConfig: ${overrideConfig?.stockInfoConfig ? JSON.stringify(overrideConfig.stockInfoConfig) : "NULL"}`,
-    );
-    console.log(
-      `[AIImport]   - overrideConfig keys: ${overrideConfig ? Object.keys(overrideConfig).join(", ") : "NO overrideConfig"}`,
-    );
 
     const enhancedConfig: any = {
       formatType: (dataSource as any).formatType,
@@ -2213,7 +2204,7 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
     }
 
     // Use the final processed items for saving
-    const processedItems = itemsToImport;
+    let processedItems = itemsToImport;
 
     const file = await storage.createUploadedFile({
       dataSourceId,
@@ -2414,10 +2405,12 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
       return outOfStockMsg || null;
     };
 
+    // Dedup by style-color-size and zero out stock for future ship dates
+    const dedupOffset = (dataSource as any).stockInfoConfig?.dateOffsetDays ?? 0;
+    const dedupResult = deduplicateAndZeroFutureStock(processedItems, dedupOffset);
+    processedItems = dedupResult.items;
+
     // Map items for saving WITH stockInfo calculated
-    // BUG FIX: Only include fields that exist in the inventoryItems schema
-    // REMOVED: salePrice (not in schema, could cause type issues)
-    // ADDED: rawData (was missing)
     console.log(
       `[AIImport] STOCK INFO: ${stockInfoRule ? `Rule="${stockInfoRule.name}" inStock="${stockInfoRule.inStockMessage}"` : "NO RULE - stockInfo will be null"}`,
     );
@@ -4125,7 +4118,7 @@ export async function executeAIImport(
     }
   }
 
-  const processedItems = itemsToImport;
+  let processedItems = itemsToImport;
 
   // Step 10: Create file record
   const file = await storage.createUploadedFile({
@@ -4237,7 +4230,12 @@ export async function executeAIImport(
     return outOfStockMsg || null;
   };
 
-  // Step 12: Map items for saving
+  // Step 12: Dedup by style-color-size and zero out stock for future ship dates
+  const dedupOffset = (dataSource as any).stockInfoConfig?.dateOffsetDays ?? 0;
+  const dedupResult = deduplicateAndZeroFutureStock(processedItems, dedupOffset);
+  processedItems = dedupResult.items;
+
+  // Step 13: Map items for saving
   const itemsToSave = processedItems.map((item: any) => ({
     dataSourceId,
     fileId: file.id,
@@ -4279,7 +4277,11 @@ export async function executeAIImport(
     stats: {
       totalParsed: parseResult.items.length,
       afterImportRules: importRulesResult.items.length,
+      importRulesStats: importRulesResult.stats || {},
       afterVariantRules: variantRulesResult.items.length,
+      variantRulesAdded: variantRulesResult.addedCount || 0,
+      variantRulesFiltered: variantRulesResult.filteredCount || 0,
+      variantRulesSizeFiltered: variantRulesResult.sizeFiltered || 0,
       afterPriceExpansion: itemsAfterExpansion.length,
       afterDiscontinuedFilter: processedItems.length,
       finalCount: itemsToSave.length,

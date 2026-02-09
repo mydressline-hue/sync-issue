@@ -12,6 +12,7 @@ import {
   applyImportRules,
   applyPriceBasedExpansion,
   buildStylePriceMapFromCache,
+  deduplicateAndZeroFutureStock,
 } from "./inventoryProcessing";
 import { startImport, completeImport, failImport } from "./importState";
 
@@ -2748,8 +2749,13 @@ export async function processEmailAttachment(
       }
     }
 
+    // Dedup by style-color-size and zero out stock for future ship dates
+    const dedupOffset = (dataSource as any).stockInfoConfig?.dateOffsetDays ?? 0;
+    const dedupResult = deduplicateAndZeroFutureStock(filteredItems, dedupOffset);
+    const dedupedItems = dedupResult.items;
+
     // Step 1: Apply prefix to style AND sku BEFORE cleaning (matching manual upload order)
-    const inventoryItems = filteredItems.map((item) => {
+    const inventoryItems = dedupedItems.map((item) => {
       const prefix = item.style ? getStylePrefix(item.style) : dataSource.name;
       const prefixedStyle = item.style ? `${prefix} ${item.style}` : item.style;
       // Normalize color to Title Case for SKU: "PURPLE" => "Purple"
