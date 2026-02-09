@@ -40,6 +40,7 @@ import {
   buildStylePriceMapFromCache,
   formatColorName,
   isValidShipDate,
+  deduplicateAndZeroFutureStock,
 } from "./inventoryProcessing";
 import {
   filterDiscontinuedStyles,
@@ -1732,29 +1733,7 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
     if (!dataSource)
       return res.status(404).json({ error: "Data source not found" });
 
-    // DEBUG: Log stockInfoConfig from BOTH sources
     console.log(`[AIImport] Loaded dataSource "${dataSource.name}"`);
-    console.log(
-      `[AIImport]   - DB stockInfoConfig: ${(dataSource as any).stockInfoConfig ? JSON.stringify((dataSource as any).stockInfoConfig) : "NULL"}`,
-    );
-    console.log(
-      `[AIImport]   - overrideConfig.stockInfoConfig: ${overrideConfig?.stockInfoConfig ? JSON.stringify(overrideConfig.stockInfoConfig) : "NULL"}`,
-    );
-    console.log(
-      `[AIImport]   - overrideConfig keys: ${overrideConfig ? Object.keys(overrideConfig).join(", ") : "NO overrideConfig"}`,
-    );
-    console.log(
-      `[AIImport]   - overrideConfig.filterZeroStock: ${overrideConfig?.filterZeroStock}`,
-    );
-    console.log(
-      `[AIImport]   - DB filterZeroStock=${(dataSource as any).filterZeroStock}, filterZeroStockWithFutureDates=${(dataSource as any).filterZeroStockWithFutureDates}`,
-    );
-    console.log(
-      `[AIImport]   - DB stockThresholdEnabled=${(dataSource as any).stockThresholdEnabled}, minStockThreshold=${(dataSource as any).minStockThreshold}`,
-    );
-    console.log(
-      `[AIImport]   - DB sizeLimitConfig.enabled=${(dataSource as any).sizeLimitConfig?.enabled || false}`,
-    );
 
     const enhancedConfig: any = {
       formatType: (dataSource as any).formatType,
@@ -1960,10 +1939,7 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
     );
 
     console.log(
-      `[AIImport] After import rules: ${importRulesResult.items.length} items (from ${parseResult.items.length})`,
-    );
-    console.log(
-      `[AIImport] Import rules stats: ${JSON.stringify(importRulesResult.stats || {})}`,
+      `[AIImport] Import rules applied: ${importRulesResult.stats.discontinuedFiltered} discontinued, ${importRulesResult.stats.datesParsed} dates parsed`,
     );
 
     // ============================================================
@@ -2111,7 +2087,7 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
     );
 
     console.log(
-      `[AIImport] After variant rules: ${variantRulesResult.items.length} items (added=${variantRulesResult.addedCount}, filtered=${variantRulesResult.filteredCount}, sizeFiltered=${variantRulesResult.sizeFiltered || 0})`,
+      `[AIImport] Variant rules applied: ${variantRulesResult.addedCount} sizes expanded, ${variantRulesResult.filteredCount} filtered, ${variantRulesResult.sizeFiltered || 0} size-limited`,
     );
 
     // ============================================================
@@ -2228,7 +2204,7 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
     }
 
     // Use the final processed items for saving
-    const processedItems = itemsToImport;
+    let processedItems = itemsToImport;
 
     const file = await storage.createUploadedFile({
       dataSourceId,
@@ -2429,10 +2405,12 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
       return outOfStockMsg || null;
     };
 
+    // Dedup by style-color-size and zero out stock for future ship dates
+    const dedupOffset = (dataSource as any).stockInfoConfig?.dateOffsetDays ?? 0;
+    const dedupResult = deduplicateAndZeroFutureStock(processedItems, dedupOffset);
+    processedItems = dedupResult.items;
+
     // Map items for saving WITH stockInfo calculated
-    // BUG FIX: Only include fields that exist in the inventoryItems schema
-    // REMOVED: salePrice (not in schema, could cause type issues)
-    // ADDED: rawData (was missing)
     console.log(
       `[AIImport] STOCK INFO: ${stockInfoRule ? `Rule="${stockInfoRule.name}" inStock="${stockInfoRule.inStockMessage}"` : "NO RULE - stockInfo will be null"}`,
     );
@@ -3783,11 +3761,6 @@ export async function executeAIImport(
   }
 
   console.log(`[AIImport:shared] Loaded dataSource "${dataSource.name}", files=${fileBuffers.length}`);
-  console.log(`[AIImport:shared] overrideConfig keys: ${overrideConfig ? Object.keys(overrideConfig).join(", ") : "NO overrideConfig"}`);
-  console.log(`[AIImport:shared] DB filterZeroStock=${(dataSource as any).filterZeroStock}, filterZeroStockWithFutureDates=${(dataSource as any).filterZeroStockWithFutureDates}`);
-  console.log(`[AIImport:shared] DB stockThresholdEnabled=${(dataSource as any).stockThresholdEnabled}, minStockThreshold=${(dataSource as any).minStockThreshold}`);
-  console.log(`[AIImport:shared] DB discontinuedConfig=${JSON.stringify((dataSource as any).discontinuedConfig || (dataSource as any).discontinuedRules || null)}`);
-  console.log(`[AIImport:shared] DB sizeLimitConfig.enabled=${(dataSource as any).sizeLimitConfig?.enabled || false}`);
 
   const enhancedConfig: any = {
     formatType: (dataSource as any).formatType,
@@ -3966,8 +3939,7 @@ export async function executeAIImport(
     rawData,
   );
 
-  console.log(`[AIImport:shared] After import rules: ${importRulesResult.items.length} items (from ${parseResult.items.length})`);
-  console.log(`[AIImport:shared] Import rules stats: ${JSON.stringify(importRulesResult.stats || {})}`);
+  console.log(`[AIImport:shared] After import rules: ${importRulesResult.items.length} items`);
 
   // Step 5: Apply global color mappings
   let itemsWithMappedColors = importRulesResult.items;
@@ -4078,7 +4050,7 @@ export async function executeAIImport(
     variantRulesConfigOverride,
   );
 
-  console.log(`[AIImport:shared] After variant rules: ${variantRulesResult.items.length} items (added=${variantRulesResult.addedCount}, filtered=${variantRulesResult.filteredCount}, sizeFiltered=${variantRulesResult.sizeFiltered || 0})`);
+  console.log(`[AIImport:shared] After variant rules: ${variantRulesResult.items.length} items`);
 
   // Step 8: Price-based size expansion
   let priceBasedExpansionCount = 0;
@@ -4146,7 +4118,7 @@ export async function executeAIImport(
     }
   }
 
-  const processedItems = itemsToImport;
+  let processedItems = itemsToImport;
 
   // Step 10: Create file record
   const file = await storage.createUploadedFile({
@@ -4258,7 +4230,12 @@ export async function executeAIImport(
     return outOfStockMsg || null;
   };
 
-  // Step 12: Map items for saving
+  // Step 12: Dedup by style-color-size and zero out stock for future ship dates
+  const dedupOffset = (dataSource as any).stockInfoConfig?.dateOffsetDays ?? 0;
+  const dedupResult = deduplicateAndZeroFutureStock(processedItems, dedupOffset);
+  processedItems = dedupResult.items;
+
+  // Step 13: Map items for saving
   const itemsToSave = processedItems.map((item: any) => ({
     dataSourceId,
     fileId: file.id,
