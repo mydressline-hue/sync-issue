@@ -112,7 +112,7 @@ interface BrandDetectionConfig {
   regex?: string;
 }
 
-interface UniversalParserConfig {
+export interface UniversalParserConfig {
   skipRows?: number;
   discontinuedConfig?: DiscontinuedConfig;
   futureDateConfig?: FutureDateConfig;
@@ -215,7 +215,7 @@ function resolveColumnIndex(
 // AUTO-DETECT PIVOT FORMAT
 // ============================================================
 
-function autoDetectPivotFormat(
+export function autoDetectPivotFormat(
   data: any[][],
   dataSourceName?: string,
   filename?: string,
@@ -342,13 +342,13 @@ function autoDetectPivotFormat(
 // INTELLIGENT PIVOT FORMAT PARSER
 // ============================================================
 
-function parseIntelligentPivotFormat(
+export function parseIntelligentPivotFormat(
   buffer: Buffer,
   formatType: string,
   config: UniversalParserConfig,
   dataSourceName?: string,
   filename?: string,
-): { headers: string[]; rows: any[][]; items: PivotItem[] } {
+): { headers: string[]; rows: any[][]; items: any[] } {
   const workbook = XLSX.read(buffer, { type: "buffer" });
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
   const rawData = XLSX.utils.sheet_to_json(sheet, {
