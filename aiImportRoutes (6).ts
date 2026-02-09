@@ -323,8 +323,8 @@ function autoDetectPivotFormat(
   // Store Multibrand: row format with a vendor/brand column + style + color + size
   const hasVendorCol = headersLower.some(
     (h: string) =>
-      h === "vendor" || h === "brand" || h === "designer" ||
-      h === "manufacturer" || h === "vendor name" || h === "brand name",
+      h.includes("vendor") || h.includes("brand") || h.includes("designer") ||
+      h.includes("manufacturer"),
   );
   const hasStyleCol = headersLower.some(
     (h: string) => h.includes("style") || h === "item" || h === "code",
@@ -1243,11 +1243,11 @@ function parseStoreMultibrandFormat(
   const productNameIdx = headersLower.findIndex(
     (h: string) => h.includes("product") && h.includes("name"),
   );
-  // Direct vendor/brand column (e.g., "Vendor", "Brand", "Designer")
+  // Direct vendor/brand column (e.g., "Vendor", "Brand", "Designer", "Vendor Name")
   const vendorIdx = headersLower.findIndex(
     (h: string) =>
-      h === "vendor" || h === "brand" || h === "designer" ||
-      h === "manufacturer" || h === "vendor name" || h === "brand name",
+      h.includes("vendor") || h.includes("brand") || h.includes("designer") ||
+      h.includes("manufacturer"),
   );
   const styleIdx = resolveColumnIndex(config, headersLower, "style", ["style"]);
   const colorIdx = resolveColumnIndex(config, headersLower, "color", ["color"]);
