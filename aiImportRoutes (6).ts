@@ -1329,7 +1329,18 @@ function parseStoreMultibrandFormat(
     items.push({ style, color: color || "DEFAULT", size, stock, price, brand });
   }
 
-  console.log(`[StoreMultibrand] vendorIdx=${vendorIdx}, sample brands: ${items.slice(0, 3).map(i => i.brand || 'NONE').join(', ')}, total=${items.length}`);
+  // Debug: write to file — check with: cat /tmp/store-import-debug.log
+  try {
+    const debugLines = [
+      `=== PARSER DEBUG ===`,
+      `vendorIdx=${vendorIdx}, productNameIdx=${productNameIdx}`,
+      `headersLower: ${headersLower.join(' | ')}`,
+      `total items: ${items.length}`,
+      `sample: ${items.slice(0, 5).map(i => `brand="${i.brand || 'NONE'}" style="${i.style}"`).join(', ')}`,
+      `unique brands: ${[...new Set(items.map(i => i.brand || 'NONE'))].join(', ')}`,
+    ];
+    require("fs").writeFileSync('/tmp/store-import-debug.log', debugLines.join('\n') + '\n');
+  } catch(e) {}
   return items;
 }
 
@@ -2149,8 +2160,17 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
 
     // Apply prefix to all items
     // If item has a brand (from store_multibrand vendor column), use brand as prefix
-    const firstItem = itemsWithMappedColors[0];
-    console.log(`[AIImport] PREFIX DEBUG: first item brand="${firstItem?.brand}", style="${firstItem?.style}", keys=${firstItem ? Object.keys(firstItem).join(',') : 'none'}`);
+    // Debug: append prefix info — check with: cat /tmp/store-import-debug.log
+    try {
+      const fi = itemsWithMappedColors[0];
+      const prefixDebug = [
+        `\n=== PREFIX DEBUG ===`,
+        `first item brand="${fi?.brand}", style="${fi?.style}"`,
+        `first item keys: ${fi ? Object.keys(fi).join(',') : 'none'}`,
+        `items with brand: ${itemsWithMappedColors.filter((i: any) => i.brand).length} / ${itemsWithMappedColors.length}`,
+      ];
+      require("fs").appendFileSync('/tmp/store-import-debug.log', prefixDebug.join('\n') + '\n');
+    } catch(e) {}
     const itemsWithPrefix = itemsWithMappedColors.map((item: any) => {
       const rawStyle = String(item.style || "").trim();
       const prefix = item.brand
