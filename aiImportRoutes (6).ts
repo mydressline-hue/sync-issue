@@ -421,9 +421,25 @@ function parseFerianiFormat(
       .trim(),
   );
 
+  const headersLower = headerRow.map((h: any) =>
+    String(h || "").toLowerCase().trim(),
+  );
   const deliveryIdx = headers.findIndex((h: string) => h.includes("DELIVERY"));
   const styleIdx = headers.findIndex((h: string) => h.includes("STYLE"));
   const colorIdx = headers.findIndex((h: string) => h.includes("COLOR"));
+
+  // For price: first check user-mapped column, then fallback to auto-detect
+  let priceIdx = -1;
+  if (config.columnMapping?.price) {
+    const mappedCol = config.columnMapping.price.toLowerCase().trim();
+    priceIdx = headersLower.findIndex((h: string) => h === mappedCol);
+  }
+  if (priceIdx === -1) {
+    priceIdx = headersLower.findIndex((h: string) =>
+      h.includes("price") || h.includes("wholesale") || h.includes("cost") ||
+      h.includes("msrp") || h === "line price",
+    );
+  }
 
   const sizePattern = /^(0|2|4|6|8|10|12|14|16|18|20|22|24|26|28|30)$/;
   const sizeColumns: { index: number; size: string }[] = [];
@@ -455,6 +471,11 @@ function parseFerianiFormat(
 
     if (!colorVal || !currentStyle) continue;
 
+    const price =
+      priceIdx >= 0
+        ? parseFloat(String(row[priceIdx] || "0")) || undefined
+        : undefined;
+
     let shipDate: string | undefined;
     const delivery = currentDelivery || deliveryVal;
     if (delivery && delivery.toUpperCase() !== "NOW") shipDate = delivery;
@@ -472,6 +493,7 @@ function parseFerianiFormat(
         color: colorVal,
         size: sc.size,
         stock,
+        price,
         shipDate,
       });
     }
@@ -504,6 +526,15 @@ function parseJovaniSaleFormat(
 
   if (sizeColumns.length === 0) return items;
 
+  // For price: check if user mapped a specific price column (overrides default column 1)
+  let priceColIdx = 1; // Default: price is in column 1 for Jovani format
+  if (config.columnMapping?.price) {
+    const headersLower = headerRow.map((h: any) => String(h || "").toLowerCase().trim());
+    const mappedCol = config.columnMapping.price.toLowerCase().trim();
+    const userIdx = headersLower.findIndex((h: string) => h === mappedCol);
+    if (userIdx >= 0) priceColIdx = userIdx;
+  }
+
   // Style patterns: #02861, JVN04759, 04859, AL02665, etc.
   const stylePattern = /^#?\d{4,6}$|^#?\d{5}[A-Z]?$|^[A-Z]{2,3}\d{4,6}$/i;
 
@@ -515,13 +546,13 @@ function parseJovaniSaleFormat(
     if (!row || row.every((c: any) => !c && c !== 0)) continue;
 
     const cell0 = String(row[0] ?? "").trim();
-    const cell1 = row[1];
+    const priceCell = row[priceColIdx];
 
     // Check if this is a style row
     if (stylePattern.test(cell0)) {
       currentStyle = cell0.replace(/^#/, "");
       currentPrice =
-        typeof cell1 === "number" ? cell1 : parseFloat(String(cell1 || "0"));
+        typeof priceCell === "number" ? priceCell : parseFloat(String(priceCell || "0"));
       continue;
     }
 
@@ -573,6 +604,20 @@ function parseTarikEdizFormat(
     }
   }
 
+  // For price: check if a header row exists before data and user mapped a price column
+  let priceIdx = -1;
+  if (config.columnMapping?.price && dataStartIdx > 0) {
+    const possibleHeaders = data[0].map((h: any) => String(h || "").toLowerCase().trim());
+    const mappedCol = config.columnMapping.price.toLowerCase().trim();
+    priceIdx = possibleHeaders.findIndex((h: string) => h === mappedCol);
+    if (priceIdx === -1) {
+      priceIdx = possibleHeaders.findIndex((h: string) =>
+        h.includes("price") || h.includes("wholesale") || h.includes("cost") ||
+        h.includes("msrp") || h === "line price",
+      );
+    }
+  }
+
   const sizePattern = /^(0|2|4|6|8|10|12|14|16|18|20|22|24)$/;
   let currentStyle = "";
   let currentSizeHeaders: string[] = [];
@@ -599,6 +644,11 @@ function parseTarikEdizFormat(
     const colorVal = String(row[11] ?? row[3] ?? "").trim();
     if (!colorVal) continue;
 
+    const price =
+      priceIdx >= 0
+        ? parseFloat(String(row[priceIdx] || "0")) || undefined
+        : undefined;
+
     for (let i = 0; i < currentSizeHeaders.length; i++) {
       const stock = parseStockValue(
         row[13 + i],
@@ -609,6 +659,7 @@ function parseTarikEdizFormat(
         color: colorVal,
         size: currentSizeHeaders[i],
         stock,
+        price,
         discontinued: isDiscontinued,
       });
     }
@@ -636,6 +687,21 @@ function parseSherriHillFormat(
   );
 
   const headerRow = data[0];
+  const headersLowerSH = headerRow.map((h: any) => String(h || "").toLowerCase().trim());
+
+  // For price: first check user-mapped column, then fallback to auto-detect
+  let priceIdx = -1;
+  if (config.columnMapping?.price) {
+    const mappedCol = config.columnMapping.price.toLowerCase().trim();
+    priceIdx = headersLowerSH.findIndex((h: string) => h === mappedCol);
+  }
+  if (priceIdx === -1) {
+    priceIdx = headersLowerSH.findIndex((h: string) =>
+      h.includes("price") || h.includes("wholesale") || h.includes("cost") ||
+      h.includes("msrp") || h === "line price",
+    );
+  }
+
   const sizePattern =
     /^(OO0|OOO|OO|0|2|4|6|8|10|12|14|16|18|20|22|24|26|28|30)$/i;
   const sizeColumns: { index: number; size: string; dateIndex: number }[] = [];
@@ -661,6 +727,11 @@ function parseSherriHillFormat(
     const color = String(row[1] ?? "").trim();
     if (!style || !color) continue;
 
+    const price =
+      priceIdx >= 0
+        ? parseFloat(String(row[priceIdx] || "0")) || undefined
+        : undefined;
+
     for (const sc of sizeColumns) {
       const stock = parseStockValue(
         row[sc.index],
@@ -681,7 +752,7 @@ function parseSherriHillFormat(
       }
 
       if (stock > 0 || (shipDate && isValidShipDate(shipDate))) {
-        items.push({ style, color, size: sc.size, stock, shipDate });
+        items.push({ style, color, size: sc.size, stock, price, shipDate });
       }
     }
   }
@@ -750,6 +821,19 @@ function parseGenericPivotFormat(
     );
   }
 
+  // For price: first check user-mapped column, then fallback to auto-detect
+  let priceIdx = -1;
+  if (config.columnMapping?.price) {
+    const mappedCol = config.columnMapping.price.toLowerCase().trim();
+    priceIdx = headersLower.findIndex((h: string) => h === mappedCol);
+  }
+  if (priceIdx === -1) {
+    priceIdx = headersLower.findIndex((h: string) =>
+      h.includes("price") || h.includes("wholesale") || h.includes("cost") ||
+      h.includes("msrp") || h === "line price",
+    );
+  }
+
   // Use configured keywords (from UI) or fallback to defaults
   // Check both 'keywords' (new UI format) and 'values' (old format)
   const configKeywords =
@@ -783,6 +867,11 @@ function parseGenericPivotFormat(
     const style = String(row[styleIdx] ?? "").trim();
     const color = colorIdx >= 0 ? String(row[colorIdx] ?? "").trim() : "";
     if (!style) continue;
+
+    const price =
+      priceIdx >= 0
+        ? parseFloat(String(row[priceIdx] || "0")) || undefined
+        : undefined;
 
     let shipDate: string | undefined;
     if (dateIdx >= 0) {
@@ -818,6 +907,7 @@ function parseGenericPivotFormat(
           color: color || "DEFAULT",
           size: sc.size,
           stock,
+          price,
           shipDate,
           discontinued: isDiscontinued,
         });
@@ -842,6 +932,8 @@ function parsePRDateHeaderFormat(
   const headerRow = data[0];
   const headers = headerRow.map((h: any) => String(h ?? "").trim());
 
+  const headersLower = headers.map((h: string) => h.toLowerCase());
+
   const styleIdx = headers.findIndex(
     (h: string) =>
       h.toLowerCase().includes("product") || h.toLowerCase().includes("code"),
@@ -849,6 +941,19 @@ function parsePRDateHeaderFormat(
   const availableIdx = headers.findIndex((h: string) =>
     h.toLowerCase().includes("available"),
   );
+
+  // For price: first check user-mapped column, then fallback to auto-detect
+  let priceIdx = -1;
+  if (config.columnMapping?.price) {
+    const mappedCol = config.columnMapping.price.toLowerCase().trim();
+    priceIdx = headersLower.findIndex((h: string) => h === mappedCol);
+  }
+  if (priceIdx === -1) {
+    priceIdx = headersLower.findIndex((h: string) =>
+      h.includes("price") || h.includes("wholesale") || h.includes("cost") ||
+      h.includes("msrp") || h === "line price",
+    );
+  }
 
   // FIX: Detect date columns - support BOTH Excel serial numbers AND human-readable dates (M/D/YY)
   const dateColumns: { index: number; date: string }[] = [];
@@ -915,6 +1020,11 @@ function parsePRDateHeaderFormat(
       extractedSize = extractedSize.replace(/^0+/, "");
     }
 
+    const price =
+      priceIdx >= 0
+        ? parseFloat(String(row[priceIdx] || "0")) || undefined
+        : undefined;
+
     const currentStock =
       availableIdx >= 0
         ? parseStockValue(row[availableIdx], config.stockConfig?.textMappings)
@@ -932,6 +1042,7 @@ function parsePRDateHeaderFormat(
         color: color || "DEFAULT",
         size,
         stock: currentStock,
+        price,
       });
     }
 
@@ -952,6 +1063,7 @@ function parsePRDateHeaderFormat(
           color: color || "DEFAULT",
           size,
           stock: 0,
+          price,
           incomingStock: futureStock,
           shipDate: dc.date,
         });
@@ -999,6 +1111,19 @@ function parseGRNInvoiceFormat(
   const codeIdx = headersLower.findIndex((h: string) => h === "code");
   const colorIdx = headersLower.findIndex((h: string) => h === "color");
 
+  // For price: first check user-mapped column, then fallback to auto-detect
+  let priceIdx = -1;
+  if (config.columnMapping?.price) {
+    const mappedCol = config.columnMapping.price.toLowerCase().trim();
+    priceIdx = headersLower.findIndex((h: string) => h === mappedCol);
+  }
+  if (priceIdx === -1) {
+    priceIdx = headersLower.findIndex((h: string) =>
+      h.includes("price") || h.includes("wholesale") || h.includes("cost") ||
+      h.includes("msrp") || h === "line price",
+    );
+  }
+
   const sizePattern = /^(000|00|0|02|04|06|08|10|12|14|16|18|20|22|24)$/i;
   const sizeColumns: { index: number; size: string }[] = [];
 
@@ -1021,6 +1146,11 @@ function parseGRNInvoiceFormat(
     const color = colorIdx >= 0 ? String(row[colorIdx] ?? "").trim() : "";
     if (!code) continue;
 
+    const price =
+      priceIdx >= 0
+        ? parseFloat(String(row[priceIdx] || "0")) || undefined
+        : undefined;
+
     for (const sc of sizeColumns) {
       const stock = parseStockValue(
         row[sc.index],
@@ -1032,6 +1162,7 @@ function parseGRNInvoiceFormat(
           color: color || "DEFAULT",
           size: sc.size,
           stock,
+          price,
         });
       }
     }
@@ -1060,7 +1191,20 @@ function parseOTSFormat(
 
   const styleIdx = headers.findIndex((h: string) => h === "style");
   const colorIdx = headers.findIndex((h: string) => h === "color");
-  const priceIdx = headers.findIndex((h: string) => h.includes("price"));
+
+  // For price: first check user-mapped column, then fallback to auto-detect
+  let priceIdx = -1;
+  if (config.columnMapping?.price) {
+    const mappedCol = config.columnMapping.price.toLowerCase().trim();
+    priceIdx = headers.findIndex((h: string) => h === mappedCol);
+  }
+  if (priceIdx === -1) {
+    priceIdx = headers.findIndex((h: string) =>
+      h.includes("price") || h.includes("wholesale") || h.includes("cost") ||
+      h.includes("msrp") || h === "line price",
+    );
+  }
+
   const sizeCompIdx = headers.findIndex(
     (h: string) => h.includes("size_whole") || h.includes("size"),
   );
@@ -1144,7 +1288,19 @@ function parseStoreMultibrandFormat(
   const stockIdx = headersLower.findIndex(
     (h: string) => h === "stock" || h.includes("qty"),
   );
-  const priceIdx = headersLower.findIndex((h: string) => h === "price");
+
+  // For price: first check user-mapped column, then fallback to auto-detect
+  let priceIdx = -1;
+  if (config.columnMapping?.price) {
+    const mappedCol = config.columnMapping.price.toLowerCase().trim();
+    priceIdx = headersLower.findIndex((h: string) => h === mappedCol);
+  }
+  if (priceIdx === -1) {
+    priceIdx = headersLower.findIndex((h: string) =>
+      h === "price" || h.includes("wholesale") || h.includes("cost") ||
+      h.includes("msrp") || h === "line price",
+    );
+  }
 
   if (styleIdx === -1) return items;
 
@@ -1267,14 +1423,22 @@ function parseRowFormat(
     "_inventory_level",
     "immediate stock",
   ]);
-  const priceIdx = findColumn([
-    "price",
-    "wholesale",
-    "cost",
-    "line price",
-    "msrp",
-    "_price",
-  ]);
+  // For price: first check user-mapped column, then fallback to auto-detect
+  let priceIdx = -1;
+  if (config.columnMapping?.price) {
+    const mappedCol = config.columnMapping.price.toLowerCase().trim();
+    priceIdx = headersLower.findIndex((h: string) => h === mappedCol);
+  }
+  if (priceIdx === -1) {
+    priceIdx = findColumn([
+      "price",
+      "wholesale",
+      "cost",
+      "line price",
+      "msrp",
+      "_price",
+    ]);
+  }
   const dateIdx = findColumn([
     "eta",
     "ship",
@@ -1413,6 +1577,30 @@ router.post("/analyze", upload.any(), async (req: Request, res: Response) => {
     );
 
     if (pivotFormat) {
+      // Still return actual column headers so UI dropdowns are populated
+      // and users can manually map price/cost/etc. even for pivot formats
+      const pivotHeaders = rawData[0] || [];
+      const pivotHeadersLower = pivotHeaders.map((h: any) =>
+        String(h || "").toLowerCase(),
+      );
+
+      // Run basic column detection for pivot formats too
+      const pivotMapping: any = {};
+      const pivotPriceIdx = pivotHeadersLower.findIndex((h: string) =>
+        h.includes("price") || h.includes("wholesale") || h.includes("cost") ||
+        h.includes("msrp") || h === "line price",
+      );
+      const pivotDateIdx = pivotHeadersLower.findIndex((h: string) =>
+        h.includes("date") || h.includes("eta") || h.includes("ship") ||
+        h.includes("arrival") || h.includes("delivery"),
+      );
+      const pivotStatusIdx = pivotHeadersLower.findIndex((h: string) =>
+        h.includes("status") || h.includes("discontinued") || h.includes("active"),
+      );
+      if (pivotPriceIdx >= 0) pivotMapping.price = String(pivotHeaders[pivotPriceIdx] || "");
+      if (pivotDateIdx >= 0) pivotMapping.shipDate = String(pivotHeaders[pivotDateIdx] || "");
+      if (pivotStatusIdx >= 0) pivotMapping.discontinued = String(pivotHeaders[pivotStatusIdx] || "");
+
       return res.json({
         detection: {
           success: true,
@@ -1421,17 +1609,20 @@ router.post("/analyze", upload.any(), async (req: Request, res: Response) => {
             : `pivot_${pivotFormat}`,
           formatConfidence: 95,
           confidence: 95,
-          columnMapping: {},
-          suggestedColumnMapping: {},
+          columnMapping: pivotMapping,
+          suggestedColumnMapping: pivotMapping,
           pivotConfig: { enabled: true, format: pivotFormat },
           notes: [`Auto-detected ${pivotFormat} pivot format`],
           warnings: [],
-          columns: [],
+          columns: pivotHeaders.map((h: any, i: number) => ({
+            headerName: String(h || ""),
+            columnIndex: i,
+          })),
           detectedPatterns: {
-            hasDiscontinuedIndicators: false,
-            hasDateColumns: false,
+            hasDiscontinuedIndicators: pivotStatusIdx >= 0,
+            hasDateColumns: pivotDateIdx >= 0,
             hasTextStockValues: false,
-            hasPriceColumn: false,
+            hasPriceColumn: pivotPriceIdx >= 0,
           },
         },
       });
@@ -1474,7 +1665,8 @@ router.post("/analyze", upload.any(), async (req: Request, res: Response) => {
           h.includes("stock") || h.includes("qty") || h.includes("available"),
       );
       const priceIdx = headersLower.findIndex((h: string) =>
-        h.includes("price"),
+        h.includes("price") || h.includes("wholesale") || h.includes("cost") ||
+        h.includes("msrp") || h === "line price",
       );
 
       if (styleIdx >= 0) basicMapping.style = headers[styleIdx];
