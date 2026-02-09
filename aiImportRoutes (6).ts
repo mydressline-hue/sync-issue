@@ -2548,6 +2548,20 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
       await storage.upsertInventoryItems(itemsToSave, dataSourceId);
     } else {
       // Full Sync (default): Delete all existing, then insert new
+      // SAFETY NET: Block if 0 items would wipe existing inventory
+      if (itemsToSave.length === 0) {
+        const existingCount = await storage.getInventoryItemCountByDataSource(dataSourceId);
+        if (existingCount > 0) {
+          console.error(
+            `[AIImport] SAFETY BLOCK: File has 0 items but data source has ${existingCount} existing items. Import blocked to prevent data loss.`,
+          );
+          return res.status(400).json({
+            error: `SAFETY NET: File has 0 items but would delete ${existingCount} existing items. Import blocked.`,
+            safetyBlock: true,
+            existingCount,
+          });
+        }
+      }
       console.log(
         `[AIImport] Full sync: deleting existing items and inserting ${itemsToSave.length} new items`,
       );
@@ -4340,6 +4354,21 @@ export async function executeAIImport(
   if (updateStrategy === "replace") {
     await storage.upsertInventoryItems(itemsToSave, dataSourceId);
   } else {
+    // SAFETY NET: Block if 0 items would wipe existing inventory
+    if (itemsToSave.length === 0) {
+      const existingCount = await storage.getInventoryItemCountByDataSource(dataSourceId);
+      if (existingCount > 0) {
+        console.error(
+          `[AIImport:shared] SAFETY BLOCK: 0 items parsed but data source "${dataSource.name}" has ${existingCount} existing items. Import blocked to prevent data loss.`,
+        );
+        return {
+          success: false,
+          itemCount: 0,
+          error: `SAFETY NET: 0 items parsed but would delete ${existingCount} existing items. Import blocked.`,
+          safetyBlock: true,
+        };
+      }
+    }
     await storage.deleteInventoryItemsByDataSource(dataSourceId);
     await storage.createInventoryItems(itemsToSave);
   }
