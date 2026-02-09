@@ -1743,6 +1743,18 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
     console.log(
       `[AIImport]   - overrideConfig keys: ${overrideConfig ? Object.keys(overrideConfig).join(", ") : "NO overrideConfig"}`,
     );
+    console.log(
+      `[AIImport]   - overrideConfig.filterZeroStock: ${overrideConfig?.filterZeroStock}`,
+    );
+    console.log(
+      `[AIImport]   - DB filterZeroStock=${(dataSource as any).filterZeroStock}, filterZeroStockWithFutureDates=${(dataSource as any).filterZeroStockWithFutureDates}`,
+    );
+    console.log(
+      `[AIImport]   - DB stockThresholdEnabled=${(dataSource as any).stockThresholdEnabled}, minStockThreshold=${(dataSource as any).minStockThreshold}`,
+    );
+    console.log(
+      `[AIImport]   - DB sizeLimitConfig.enabled=${(dataSource as any).sizeLimitConfig?.enabled || false}`,
+    );
 
     const enhancedConfig: any = {
       formatType: (dataSource as any).formatType,
@@ -1948,7 +1960,10 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
     );
 
     console.log(
-      `[AIImport] Import rules applied: ${importRulesResult.stats.discontinuedFiltered} discontinued, ${importRulesResult.stats.datesParsed} dates parsed`,
+      `[AIImport] After import rules: ${importRulesResult.items.length} items (from ${parseResult.items.length})`,
+    );
+    console.log(
+      `[AIImport] Import rules stats: ${JSON.stringify(importRulesResult.stats || {})}`,
     );
 
     // ============================================================
@@ -2096,7 +2111,7 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
     );
 
     console.log(
-      `[AIImport] Variant rules applied: ${variantRulesResult.addedCount} sizes expanded, ${variantRulesResult.filteredCount} filtered, ${variantRulesResult.sizeFiltered || 0} size-limited`,
+      `[AIImport] After variant rules: ${variantRulesResult.items.length} items (added=${variantRulesResult.addedCount}, filtered=${variantRulesResult.filteredCount}, sizeFiltered=${variantRulesResult.sizeFiltered || 0})`,
     );
 
     // ============================================================
@@ -3768,6 +3783,11 @@ export async function executeAIImport(
   }
 
   console.log(`[AIImport:shared] Loaded dataSource "${dataSource.name}", files=${fileBuffers.length}`);
+  console.log(`[AIImport:shared] overrideConfig keys: ${overrideConfig ? Object.keys(overrideConfig).join(", ") : "NO overrideConfig"}`);
+  console.log(`[AIImport:shared] DB filterZeroStock=${(dataSource as any).filterZeroStock}, filterZeroStockWithFutureDates=${(dataSource as any).filterZeroStockWithFutureDates}`);
+  console.log(`[AIImport:shared] DB stockThresholdEnabled=${(dataSource as any).stockThresholdEnabled}, minStockThreshold=${(dataSource as any).minStockThreshold}`);
+  console.log(`[AIImport:shared] DB discontinuedConfig=${JSON.stringify((dataSource as any).discontinuedConfig || (dataSource as any).discontinuedRules || null)}`);
+  console.log(`[AIImport:shared] DB sizeLimitConfig.enabled=${(dataSource as any).sizeLimitConfig?.enabled || false}`);
 
   const enhancedConfig: any = {
     formatType: (dataSource as any).formatType,
@@ -3946,7 +3966,8 @@ export async function executeAIImport(
     rawData,
   );
 
-  console.log(`[AIImport:shared] After import rules: ${importRulesResult.items.length} items`);
+  console.log(`[AIImport:shared] After import rules: ${importRulesResult.items.length} items (from ${parseResult.items.length})`);
+  console.log(`[AIImport:shared] Import rules stats: ${JSON.stringify(importRulesResult.stats || {})}`);
 
   // Step 5: Apply global color mappings
   let itemsWithMappedColors = importRulesResult.items;
@@ -4042,11 +4063,6 @@ export async function executeAIImport(
   console.log(`[AIImport:shared] Applied prefix to ${itemsWithPrefix.length} items`);
 
   // Step 7: Apply variant rules
-  // CRITICAL: When no overrideConfig is provided (e.g. email import), explicitly
-  // disable filterZeroStock to match the manual "Import 2 Files" behavior.
-  // The manual UI sends filterZeroStock:false in its config. Zero-stock filtering
-  // should happen at Shopify sync time, not during import — otherwise email imports
-  // produce fewer items than manual imports with the same files.
   const variantRulesConfigOverride =
     overrideConfig?.filterZeroStock !== undefined
       ? {
@@ -4054,9 +4070,7 @@ export async function executeAIImport(
           filterZeroStockWithFutureDates:
             overrideConfig?.filterZeroStockWithFutureDates,
         }
-      : { filterZeroStock: false, filterZeroStockWithFutureDates: false };
-
-  console.log(`[AIImport:shared] filterZeroStock: DB=${(dataSource as any).filterZeroStock}, override=${overrideConfig?.filterZeroStock}, applied=false (matching manual import)`);
+      : undefined;
 
   const variantRulesResult = await applyVariantRules(
     itemsWithPrefix,
@@ -4064,7 +4078,7 @@ export async function executeAIImport(
     variantRulesConfigOverride,
   );
 
-  console.log(`[AIImport:shared] After variant rules: ${variantRulesResult.items.length} items`);
+  console.log(`[AIImport:shared] After variant rules: ${variantRulesResult.items.length} items (added=${variantRulesResult.addedCount}, filtered=${variantRulesResult.filteredCount}, sizeFiltered=${variantRulesResult.sizeFiltered || 0})`);
 
   // Step 8: Price-based size expansion
   let priceBasedExpansionCount = 0;
@@ -4286,7 +4300,11 @@ export async function executeAIImport(
     stats: {
       totalParsed: parseResult.items.length,
       afterImportRules: importRulesResult.items.length,
+      importRulesStats: importRulesResult.stats || {},
       afterVariantRules: variantRulesResult.items.length,
+      variantRulesAdded: variantRulesResult.addedCount || 0,
+      variantRulesFiltered: variantRulesResult.filteredCount || 0,
+      variantRulesSizeFiltered: variantRulesResult.sizeFiltered || 0,
       afterPriceExpansion: itemsAfterExpansion.length,
       afterDiscontinuedFilter: processedItems.length,
       finalCount: itemsToSave.length,
