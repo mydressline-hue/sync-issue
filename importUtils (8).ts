@@ -2153,6 +2153,31 @@ export async function processEmailAttachment(
       items = result.items;
     }
 
+    // Apply data source cleaning rules to parsed items
+    // This handles: Style Find and Replace, removeLetters, removeNumbers,
+    // removeSpecialChars, removeFirstN/LastN, findReplaceRules, removePatterns
+    // These settings are configured per data source and must apply to ALL import paths.
+    if (cleaningConfig && items.length > 0) {
+      const hasAnyCleaning =
+        cleaningConfig.findText ||
+        cleaningConfig.findReplaceRules?.length > 0 ||
+        cleaningConfig.removeLetters ||
+        cleaningConfig.removeNumbers ||
+        cleaningConfig.removeSpecialChars ||
+        cleaningConfig.removeFirstN ||
+        cleaningConfig.removeLastN ||
+        cleaningConfig.removePatterns?.length > 0 ||
+        cleaningConfig.trimWhitespace;
+
+      if (hasAnyCleaning) {
+        console.log(`[Email Import] Applying data source cleaning rules to ${items.length} items`);
+        items = items.map((item: any) => ({
+          ...item,
+          style: applyCleaningToValue(String(item.style || ""), cleaningConfig, "style"),
+        }));
+      }
+    }
+
     // Log parsing results for debugging
     eLog(`[EmailImport] Parser used: ${parserUsed}`);
     eLog(`[EmailImport] Parse result: headers=${JSON.stringify(headers?.slice(0, 15))}`);

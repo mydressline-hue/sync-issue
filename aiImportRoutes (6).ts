@@ -45,6 +45,7 @@ import {
 import {
   filterDiscontinuedStyles,
   removeDiscontinuedInventoryItems,
+  applyCleaningToValue,
 } from "./importUtils";
 
 const router = Router();
@@ -2059,6 +2060,33 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
         error: "Failed to parse file",
         warnings: parseResult.warnings,
       });
+    }
+
+    // ============================================================
+    // APPLY DATA SOURCE CLEANING RULES (Style Find/Replace, etc.)
+    // These are configured per data source and must apply to ALL import paths.
+    // ============================================================
+    const cleaningConfigForCleaning =
+      overrideConfig?.cleaningConfig || (dataSource.cleaningConfig || {}) as any;
+    if (cleaningConfigForCleaning && parseResult.items.length > 0) {
+      const hasAnyCleaning =
+        cleaningConfigForCleaning.findText ||
+        cleaningConfigForCleaning.findReplaceRules?.length > 0 ||
+        cleaningConfigForCleaning.removeLetters ||
+        cleaningConfigForCleaning.removeNumbers ||
+        cleaningConfigForCleaning.removeSpecialChars ||
+        cleaningConfigForCleaning.removeFirstN ||
+        cleaningConfigForCleaning.removeLastN ||
+        cleaningConfigForCleaning.removePatterns?.length > 0 ||
+        cleaningConfigForCleaning.trimWhitespace;
+
+      if (hasAnyCleaning) {
+        console.log(`[AIImport] Applying data source cleaning rules to ${parseResult.items.length} items`);
+        parseResult.items = parseResult.items.map((item: any) => ({
+          ...item,
+          style: applyCleaningToValue(String(item.style || ""), cleaningConfigForCleaning, "style"),
+        }));
+      }
     }
 
     // ============================================================
@@ -4103,6 +4131,29 @@ export async function executeAIImport(
   }
 
   console.log(`[AIImport:shared] Parsed ${parseResult.items.length} items`);
+
+  // Step 3.5: Apply data source cleaning rules (Style Find/Replace, removeLetters, etc.)
+  const sharedCleaningConfig =
+    overrideConfig?.cleaningConfig || (dataSource.cleaningConfig || {}) as any;
+  if (sharedCleaningConfig && parseResult.items.length > 0) {
+    const hasAnyCleaning =
+      sharedCleaningConfig.findText ||
+      sharedCleaningConfig.findReplaceRules?.length > 0 ||
+      sharedCleaningConfig.removeLetters ||
+      sharedCleaningConfig.removeNumbers ||
+      sharedCleaningConfig.removeSpecialChars ||
+      sharedCleaningConfig.removeFirstN ||
+      sharedCleaningConfig.removeLastN ||
+      sharedCleaningConfig.removePatterns?.length > 0 ||
+      sharedCleaningConfig.trimWhitespace;
+    if (hasAnyCleaning) {
+      console.log(`[AIImport:shared] Applying data source cleaning rules to ${parseResult.items.length} items`);
+      parseResult.items = parseResult.items.map((item: any) => ({
+        ...item,
+        style: applyCleaningToValue(String(item.style || ""), sharedCleaningConfig, "style"),
+      }));
+    }
+  }
 
   // Step 4: Apply import rules
   const importRulesConfig = {
