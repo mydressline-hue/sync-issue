@@ -1950,6 +1950,20 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
       config.formatType === "pivoted" ||
       detectedPivotFormat !== null;
 
+    // Debug: trace which path is used — check with: cat /tmp/store-import-debug.log
+    try {
+      const headers0 = (rawData[0] || []).map((h: any) => String(h || '').toLowerCase().trim());
+      require("fs").writeFileSync('/tmp/store-import-debug.log', [
+        `=== EXECUTE PATH DEBUG ===`,
+        `dataSource.name: "${dataSource.name}"`,
+        `config.formatType: "${config.formatType}"`,
+        `detectedPivotFormat: "${detectedPivotFormat}"`,
+        `isPivotFormat: ${isPivotFormat}`,
+        `file headers: ${headers0.join(' | ')}`,
+        `rawData rows: ${rawData.length}`,
+      ].join('\n') + '\n');
+    } catch(e) {}
+
     let parseResult: any;
 
     if (isPivotFormat) {
