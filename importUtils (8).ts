@@ -2180,7 +2180,8 @@ export async function processEmailAttachment(
       console.log(
         `[Email Import] Using Tarik Ediz specific parser for ${dataSource.name}`,
       );
-      const result = parseTarikEdizFormat(buffer);
+      // Skip content validation — format is already configured on the data source
+      const result = parseTarikEdizFormat(buffer, true);
       if (result) {
         result.items = result.items.map((item: any) => ({
           ...item,
@@ -5286,6 +5287,7 @@ export function parseStoreMultibrandFormat(
 // ============================================================
 function parseTarikEdizFormat(
   buffer: Buffer,
+  skipValidation?: boolean,
 ): { headers: string[]; rows: any[][]; items: any[] } | null {
   const workbook = XLSX.read(buffer, { type: "buffer" });
   const sheetName = workbook.SheetNames[0];
@@ -5308,7 +5310,7 @@ function parseTarikEdizFormat(
     secondRowText.includes("ediz") ||
     secondRowText.includes("edi\u0307z");
 
-  if (!isTarikEdizFormat) return null;
+  if (!skipValidation && !isTarikEdizFormat) return null;
 
   console.log("Detected Tarik Ediz pivoted format - applying special parsing");
 

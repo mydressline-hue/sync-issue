@@ -2578,17 +2578,31 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
       await storage.upsertInventoryItems(itemsToSave, dataSourceId);
     } else {
       // Full Sync (default): Delete all existing, then insert new
-      // SAFETY NET: Block if 0 items would wipe existing inventory
-      if (itemsToSave.length === 0) {
-        const existingCount = await storage.getInventoryItemCountByDataSource(dataSourceId);
-        if (existingCount > 0) {
+      // SAFETY NET: Block if 0 items or massive drop would wipe existing inventory
+      const existingCount = await storage.getInventoryItemCountByDataSource(dataSourceId);
+      if (itemsToSave.length === 0 && existingCount > 0) {
+        console.error(
+          `[AIImport] SAFETY BLOCK: File has 0 items but data source has ${existingCount} existing items. Import blocked to prevent data loss.`,
+        );
+        return res.status(400).json({
+          error: `SAFETY NET: File has 0 items but would delete ${existingCount} existing items. Import blocked.`,
+          safetyBlock: true,
+          existingCount,
+        });
+      }
+      // SAFETY NET: Block if item count dropped by more than 50%
+      if (existingCount > 20 && itemsToSave.length > 0) {
+        const dropPercent = ((existingCount - itemsToSave.length) / existingCount) * 100;
+        if (dropPercent > 50) {
           console.error(
-            `[AIImport] SAFETY BLOCK: File has 0 items but data source has ${existingCount} existing items. Import blocked to prevent data loss.`,
+            `[AIImport] SAFETY BLOCK: Item count dropped ${dropPercent.toFixed(0)}% (${existingCount} → ${itemsToSave.length}). Import blocked.`,
           );
           return res.status(400).json({
-            error: `SAFETY NET: File has 0 items but would delete ${existingCount} existing items. Import blocked.`,
+            error: `SAFETY NET: Item count dropped ${dropPercent.toFixed(0)}% (from ${existingCount} to ${itemsToSave.length}). Import blocked to prevent data loss.`,
             safetyBlock: true,
             existingCount,
+            newCount: itemsToSave.length,
+            dropPercent: Math.round(dropPercent),
           });
         }
       }
@@ -4387,17 +4401,30 @@ export async function executeAIImport(
   if (updateStrategy === "replace") {
     await storage.upsertInventoryItems(itemsToSave, dataSourceId);
   } else {
-    // SAFETY NET: Block if 0 items would wipe existing inventory
-    if (itemsToSave.length === 0) {
-      const existingCount = await storage.getInventoryItemCountByDataSource(dataSourceId);
-      if (existingCount > 0) {
+    // SAFETY NET: Block if 0 items or massive drop would wipe existing inventory
+    const existingCount = await storage.getInventoryItemCountByDataSource(dataSourceId);
+    if (itemsToSave.length === 0 && existingCount > 0) {
+      console.error(
+        `[AIImport:shared] SAFETY BLOCK: 0 items parsed but data source "${dataSource.name}" has ${existingCount} existing items. Import blocked to prevent data loss.`,
+      );
+      return {
+        success: false,
+        itemCount: 0,
+        error: `SAFETY NET: 0 items parsed but would delete ${existingCount} existing items. Import blocked.`,
+        safetyBlock: true,
+      };
+    }
+    // SAFETY NET: Block if item count dropped by more than 50%
+    if (existingCount > 20 && itemsToSave.length > 0) {
+      const dropPercent = ((existingCount - itemsToSave.length) / existingCount) * 100;
+      if (dropPercent > 50) {
         console.error(
-          `[AIImport:shared] SAFETY BLOCK: 0 items parsed but data source "${dataSource.name}" has ${existingCount} existing items. Import blocked to prevent data loss.`,
+          `[AIImport:shared] SAFETY BLOCK: Item count dropped ${dropPercent.toFixed(0)}% (${existingCount} → ${itemsToSave.length}). Import blocked for "${dataSource.name}".`,
         );
         return {
           success: false,
           itemCount: 0,
-          error: `SAFETY NET: 0 items parsed but would delete ${existingCount} existing items. Import blocked.`,
+          error: `SAFETY NET: Item count dropped ${dropPercent.toFixed(0)}% (from ${existingCount} to ${itemsToSave.length}). Import blocked to prevent data loss.`,
           safetyBlock: true,
         };
       }
