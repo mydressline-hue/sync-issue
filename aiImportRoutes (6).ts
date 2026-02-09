@@ -4042,6 +4042,11 @@ export async function executeAIImport(
   console.log(`[AIImport:shared] Applied prefix to ${itemsWithPrefix.length} items`);
 
   // Step 7: Apply variant rules
+  // CRITICAL: When no overrideConfig is provided (e.g. email import), explicitly
+  // disable filterZeroStock to match the manual "Import 2 Files" behavior.
+  // The manual UI sends filterZeroStock:false in its config. Zero-stock filtering
+  // should happen at Shopify sync time, not during import — otherwise email imports
+  // produce fewer items than manual imports with the same files.
   const variantRulesConfigOverride =
     overrideConfig?.filterZeroStock !== undefined
       ? {
@@ -4049,7 +4054,9 @@ export async function executeAIImport(
           filterZeroStockWithFutureDates:
             overrideConfig?.filterZeroStockWithFutureDates,
         }
-      : undefined;
+      : { filterZeroStock: false, filterZeroStockWithFutureDates: false };
+
+  console.log(`[AIImport:shared] filterZeroStock: DB=${(dataSource as any).filterZeroStock}, override=${overrideConfig?.filterZeroStock}, applied=false (matching manual import)`);
 
   const variantRulesResult = await applyVariantRules(
     itemsWithPrefix,
