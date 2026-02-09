@@ -183,6 +183,35 @@ function parseStockValue(
 }
 
 // ============================================================
+// SHARED COLUMN RESOLUTION HELPER
+// ============================================================
+// Used by ALL parsers to resolve column indices.
+// Checks user-mapped override (from UI dropdown) FIRST,
+// then falls back to auto-detection using pattern matching.
+
+function resolveColumnIndex(
+  config: UniversalParserConfig,
+  headersLower: string[],
+  field: string,
+  autoPatterns: string[],
+): number {
+  // 1. Check user-mapped column override first (from UI dropdown selection)
+  if (config.columnMapping?.[field]) {
+    const mappedCol = config.columnMapping[field].toLowerCase().trim();
+    const idx = headersLower.findIndex((h: string) => h === mappedCol);
+    if (idx !== -1) return idx;
+  }
+  // 2. Fall back to auto-detection using pattern matching
+  for (const p of autoPatterns) {
+    const idx = headersLower.findIndex(
+      (h: string) => h === p || h.includes(p),
+    );
+    if (idx !== -1) return idx;
+  }
+  return -1;
+}
+
+// ============================================================
 // AUTO-DETECT PIVOT FORMAT
 // ============================================================
 
@@ -425,21 +454,11 @@ function parseFerianiFormat(
     String(h || "").toLowerCase().trim(),
   );
   const deliveryIdx = headers.findIndex((h: string) => h.includes("DELIVERY"));
-  const styleIdx = headers.findIndex((h: string) => h.includes("STYLE"));
-  const colorIdx = headers.findIndex((h: string) => h.includes("COLOR"));
-
-  // For price: first check user-mapped column, then fallback to auto-detect
-  let priceIdx = -1;
-  if (config.columnMapping?.price) {
-    const mappedCol = config.columnMapping.price.toLowerCase().trim();
-    priceIdx = headersLower.findIndex((h: string) => h === mappedCol);
-  }
-  if (priceIdx === -1) {
-    priceIdx = headersLower.findIndex((h: string) =>
-      h.includes("price") || h.includes("wholesale") || h.includes("cost") ||
-      h.includes("msrp") || h === "line price",
-    );
-  }
+  const styleIdx = resolveColumnIndex(config, headersLower, "style", ["style"]);
+  const colorIdx = resolveColumnIndex(config, headersLower, "color", ["color"]);
+  const priceIdx = resolveColumnIndex(config, headersLower, "price", [
+    "price", "wholesale", "cost", "msrp", "line price",
+  ]);
 
   const sizePattern = /^(0|2|4|6|8|10|12|14|16|18|20|22|24|26|28|30)$/;
   const sizeColumns: { index: number; size: string }[] = [];
@@ -530,8 +549,7 @@ function parseJovaniSaleFormat(
   let priceColIdx = 1; // Default: price is in column 1 for Jovani format
   if (config.columnMapping?.price) {
     const headersLower = headerRow.map((h: any) => String(h || "").toLowerCase().trim());
-    const mappedCol = config.columnMapping.price.toLowerCase().trim();
-    const userIdx = headersLower.findIndex((h: string) => h === mappedCol);
+    const userIdx = resolveColumnIndex(config, headersLower, "price", []);
     if (userIdx >= 0) priceColIdx = userIdx;
   }
 
@@ -604,18 +622,13 @@ function parseTarikEdizFormat(
     }
   }
 
-  // For price: check if a header row exists before data and user mapped a price column
+  // For price: check if a header row exists before data
   let priceIdx = -1;
-  if (config.columnMapping?.price && dataStartIdx > 0) {
+  if (dataStartIdx > 0) {
     const possibleHeaders = data[0].map((h: any) => String(h || "").toLowerCase().trim());
-    const mappedCol = config.columnMapping.price.toLowerCase().trim();
-    priceIdx = possibleHeaders.findIndex((h: string) => h === mappedCol);
-    if (priceIdx === -1) {
-      priceIdx = possibleHeaders.findIndex((h: string) =>
-        h.includes("price") || h.includes("wholesale") || h.includes("cost") ||
-        h.includes("msrp") || h === "line price",
-      );
-    }
+    priceIdx = resolveColumnIndex(config, possibleHeaders, "price", [
+      "price", "wholesale", "cost", "msrp", "line price",
+    ]);
   }
 
   const sizePattern = /^(0|2|4|6|8|10|12|14|16|18|20|22|24)$/;
@@ -689,18 +702,9 @@ function parseSherriHillFormat(
   const headerRow = data[0];
   const headersLowerSH = headerRow.map((h: any) => String(h || "").toLowerCase().trim());
 
-  // For price: first check user-mapped column, then fallback to auto-detect
-  let priceIdx = -1;
-  if (config.columnMapping?.price) {
-    const mappedCol = config.columnMapping.price.toLowerCase().trim();
-    priceIdx = headersLowerSH.findIndex((h: string) => h === mappedCol);
-  }
-  if (priceIdx === -1) {
-    priceIdx = headersLowerSH.findIndex((h: string) =>
-      h.includes("price") || h.includes("wholesale") || h.includes("cost") ||
-      h.includes("msrp") || h === "line price",
-    );
-  }
+  const priceIdx = resolveColumnIndex(config, headersLowerSH, "price", [
+    "price", "wholesale", "cost", "msrp", "line price",
+  ]);
 
   const sizePattern =
     /^(OO0|OOO|OO|0|2|4|6|8|10|12|14|16|18|20|22|24|26|28|30)$/i;
@@ -789,50 +793,23 @@ function parseGenericPivotFormat(
 
   const headerRow = data[headerRowIdx];
   const headers = headerRow.map((h: any) => String(h ?? "").trim());
-  const headersUpper = headers.map((h: string) => h.toUpperCase());
   const headersLower = headers.map((h: string) => h.toLowerCase());
 
-  const styleIdx = headersUpper.findIndex(
-    (h: string) => h.includes("STYLE") || h === "CODE" || h === "ITEM",
-  );
-  const colorIdx = headersUpper.findIndex(
-    (h: string) => h.includes("COLOR") && !h.includes("CODE"),
-  );
-  const dateIdx = headersUpper.findIndex(
-    (h: string) =>
-      h.includes("DATE") ||
-      h.includes("ETA") ||
-      h.includes("DUE") ||
-      h.includes("AVAILABLE"),
-  );
-
-  // For discontinued: first check user-mapped column, then fallback to auto-detect
-  let statusIdx = -1;
-  if (config.columnMapping?.discontinued) {
-    const mappedCol = config.columnMapping.discontinued.toLowerCase().trim();
-    statusIdx = headersLower.findIndex((h: string) => h === mappedCol);
-  }
-  if (statusIdx === -1) {
-    statusIdx = headersUpper.findIndex(
-      (h: string) =>
-        h.includes("STATUS") ||
-        h.includes("DISCONTINUED") ||
-        h.includes("ACTIVE"),
-    );
-  }
-
-  // For price: first check user-mapped column, then fallback to auto-detect
-  let priceIdx = -1;
-  if (config.columnMapping?.price) {
-    const mappedCol = config.columnMapping.price.toLowerCase().trim();
-    priceIdx = headersLower.findIndex((h: string) => h === mappedCol);
-  }
-  if (priceIdx === -1) {
-    priceIdx = headersLower.findIndex((h: string) =>
-      h.includes("price") || h.includes("wholesale") || h.includes("cost") ||
-      h.includes("msrp") || h === "line price",
-    );
-  }
+  const styleIdx = resolveColumnIndex(config, headersLower, "style", [
+    "style", "code", "item",
+  ]);
+  const colorIdx = resolveColumnIndex(config, headersLower, "color", [
+    "color", "colour",
+  ]);
+  const dateIdx = resolveColumnIndex(config, headersLower, "shipDate", [
+    "date", "eta", "due", "available",
+  ]);
+  const statusIdx = resolveColumnIndex(config, headersLower, "discontinued", [
+    "status", "discontinued", "active",
+  ]);
+  const priceIdx = resolveColumnIndex(config, headersLower, "price", [
+    "price", "wholesale", "cost", "msrp", "line price",
+  ]);
 
   // Use configured keywords (from UI) or fallback to defaults
   // Check both 'keywords' (new UI format) and 'values' (old format)
@@ -934,26 +911,15 @@ function parsePRDateHeaderFormat(
 
   const headersLower = headers.map((h: string) => h.toLowerCase());
 
-  const styleIdx = headers.findIndex(
-    (h: string) =>
-      h.toLowerCase().includes("product") || h.toLowerCase().includes("code"),
-  );
-  const availableIdx = headers.findIndex((h: string) =>
-    h.toLowerCase().includes("available"),
-  );
-
-  // For price: first check user-mapped column, then fallback to auto-detect
-  let priceIdx = -1;
-  if (config.columnMapping?.price) {
-    const mappedCol = config.columnMapping.price.toLowerCase().trim();
-    priceIdx = headersLower.findIndex((h: string) => h === mappedCol);
-  }
-  if (priceIdx === -1) {
-    priceIdx = headersLower.findIndex((h: string) =>
-      h.includes("price") || h.includes("wholesale") || h.includes("cost") ||
-      h.includes("msrp") || h === "line price",
-    );
-  }
+  const styleIdx = resolveColumnIndex(config, headersLower, "style", [
+    "product", "code",
+  ]);
+  const availableIdx = resolveColumnIndex(config, headersLower, "stock", [
+    "available",
+  ]);
+  const priceIdx = resolveColumnIndex(config, headersLower, "price", [
+    "price", "wholesale", "cost", "msrp", "line price",
+  ]);
 
   // FIX: Detect date columns - support BOTH Excel serial numbers AND human-readable dates (M/D/YY)
   const dateColumns: { index: number; date: string }[] = [];
@@ -1108,21 +1074,11 @@ function parseGRNInvoiceFormat(
       .trim(),
   );
 
-  const codeIdx = headersLower.findIndex((h: string) => h === "code");
-  const colorIdx = headersLower.findIndex((h: string) => h === "color");
-
-  // For price: first check user-mapped column, then fallback to auto-detect
-  let priceIdx = -1;
-  if (config.columnMapping?.price) {
-    const mappedCol = config.columnMapping.price.toLowerCase().trim();
-    priceIdx = headersLower.findIndex((h: string) => h === mappedCol);
-  }
-  if (priceIdx === -1) {
-    priceIdx = headersLower.findIndex((h: string) =>
-      h.includes("price") || h.includes("wholesale") || h.includes("cost") ||
-      h.includes("msrp") || h === "line price",
-    );
-  }
+  const codeIdx = resolveColumnIndex(config, headersLower, "style", ["code"]);
+  const colorIdx = resolveColumnIndex(config, headersLower, "color", ["color"]);
+  const priceIdx = resolveColumnIndex(config, headersLower, "price", [
+    "price", "wholesale", "cost", "msrp", "line price",
+  ]);
 
   const sizePattern = /^(000|00|0|02|04|06|08|10|12|14|16|18|20|22|24)$/i;
   const sizeColumns: { index: number; size: string }[] = [];
@@ -1189,21 +1145,11 @@ function parseOTSFormat(
       .toLowerCase(),
   );
 
-  const styleIdx = headers.findIndex((h: string) => h === "style");
-  const colorIdx = headers.findIndex((h: string) => h === "color");
-
-  // For price: first check user-mapped column, then fallback to auto-detect
-  let priceIdx = -1;
-  if (config.columnMapping?.price) {
-    const mappedCol = config.columnMapping.price.toLowerCase().trim();
-    priceIdx = headers.findIndex((h: string) => h === mappedCol);
-  }
-  if (priceIdx === -1) {
-    priceIdx = headers.findIndex((h: string) =>
-      h.includes("price") || h.includes("wholesale") || h.includes("cost") ||
-      h.includes("msrp") || h === "line price",
-    );
-  }
+  const styleIdx = resolveColumnIndex(config, headers, "style", ["style"]);
+  const colorIdx = resolveColumnIndex(config, headers, "color", ["color"]);
+  const priceIdx = resolveColumnIndex(config, headers, "price", [
+    "price", "wholesale", "cost", "msrp", "line price",
+  ]);
 
   const sizeCompIdx = headers.findIndex(
     (h: string) => h.includes("size_whole") || h.includes("size"),
@@ -1282,25 +1228,15 @@ function parseStoreMultibrandFormat(
   const productNameIdx = headersLower.findIndex(
     (h: string) => h.includes("product") && h.includes("name"),
   );
-  const styleIdx = headersLower.findIndex((h: string) => h === "style");
-  const colorIdx = headersLower.findIndex((h: string) => h === "color");
-  const sizeIdx = headersLower.findIndex((h: string) => h === "size");
-  const stockIdx = headersLower.findIndex(
-    (h: string) => h === "stock" || h.includes("qty"),
-  );
-
-  // For price: first check user-mapped column, then fallback to auto-detect
-  let priceIdx = -1;
-  if (config.columnMapping?.price) {
-    const mappedCol = config.columnMapping.price.toLowerCase().trim();
-    priceIdx = headersLower.findIndex((h: string) => h === mappedCol);
-  }
-  if (priceIdx === -1) {
-    priceIdx = headersLower.findIndex((h: string) =>
-      h === "price" || h.includes("wholesale") || h.includes("cost") ||
-      h.includes("msrp") || h === "line price",
-    );
-  }
+  const styleIdx = resolveColumnIndex(config, headersLower, "style", ["style"]);
+  const colorIdx = resolveColumnIndex(config, headersLower, "color", ["color"]);
+  const sizeIdx = resolveColumnIndex(config, headersLower, "size", ["size"]);
+  const stockIdx = resolveColumnIndex(config, headersLower, "stock", [
+    "stock", "qty", "quantity",
+  ]);
+  const priceIdx = resolveColumnIndex(config, headersLower, "price", [
+    "price", "wholesale", "cost", "msrp", "line price",
+  ]);
 
   if (styleIdx === -1) return items;
 
@@ -1385,78 +1321,28 @@ function parseRowFormat(
   const headers = headerRow.map((h: any) => String(h ?? "").trim());
   const headersLower = headers.map((h: string) => h.toLowerCase());
 
-  const findColumn = (patterns: string[]): number => {
-    for (const p of patterns) {
-      const idx = headersLower.findIndex(
-        (h: string) => h === p || h.includes(p),
-      );
-      if (idx !== -1) return idx;
-    }
-    return -1;
-  };
-
-  const styleIdx = findColumn([
-    "style",
-    "style#",
-    "item",
-    "product_id",
-    "product",
-    "code",
-    "sku",
+  const styleIdx = resolveColumnIndex(config, headersLower, "style", [
+    "style", "style#", "item", "product_id", "product", "code", "sku",
   ]);
-  const colorIdx = findColumn([
-    "color",
-    "colour",
-    "_color_name",
-    "color_descript",
+  const colorIdx = resolveColumnIndex(config, headersLower, "color", [
+    "color", "colour", "_color_name", "color_descript",
   ]);
-  const sizeIdx = findColumn(["size", "_size", "sizename"]);
-  const stockIdx = findColumn([
-    "stock",
-    "qty",
-    "quantity",
-    "available",
-    "onhand",
-    "ats_qty",
-    "opentosale",
-    "inventory",
-    "_inventory_level",
-    "immediate stock",
+  const sizeIdx = resolveColumnIndex(config, headersLower, "size", [
+    "size", "_size", "sizename",
   ]);
-  // For price: first check user-mapped column, then fallback to auto-detect
-  let priceIdx = -1;
-  if (config.columnMapping?.price) {
-    const mappedCol = config.columnMapping.price.toLowerCase().trim();
-    priceIdx = headersLower.findIndex((h: string) => h === mappedCol);
-  }
-  if (priceIdx === -1) {
-    priceIdx = findColumn([
-      "price",
-      "wholesale",
-      "cost",
-      "line price",
-      "msrp",
-      "_price",
-    ]);
-  }
-  const dateIdx = findColumn([
-    "eta",
-    "ship",
-    "date",
-    "arrival",
-    "expected",
-    "future ship",
+  const stockIdx = resolveColumnIndex(config, headersLower, "stock", [
+    "stock", "qty", "quantity", "available", "onhand", "ats_qty",
+    "opentosale", "inventory", "_inventory_level", "immediate stock",
   ]);
-
-  // For discontinued: first check user-mapped column, then fallback to auto-detect
-  let statusIdx = -1;
-  if (config.columnMapping?.discontinued) {
-    const mappedCol = config.columnMapping.discontinued.toLowerCase().trim();
-    statusIdx = headersLower.findIndex((h: string) => h === mappedCol);
-  }
-  if (statusIdx === -1) {
-    statusIdx = findColumn(["status", "discontinued", "active", "_status"]);
-  }
+  const priceIdx = resolveColumnIndex(config, headersLower, "price", [
+    "price", "wholesale", "cost", "line price", "msrp", "_price",
+  ]);
+  const dateIdx = resolveColumnIndex(config, headersLower, "shipDate", [
+    "eta", "ship", "date", "arrival", "expected", "future ship",
+  ]);
+  const statusIdx = resolveColumnIndex(config, headersLower, "discontinued", [
+    "status", "discontinued", "active", "_status",
+  ]);
 
   if (styleIdx === -1) return items;
 
