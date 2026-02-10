@@ -50,7 +50,11 @@ import {
 } from "./shopify";
 import { triggerShopifySyncAfterImport } from "./scheduler";
 import { registerVendorImportRoutes } from "./vendorImportRoutes";
-import aiImportRoutes, { autoDetectPivotFormat, parseIntelligentPivotFormat, UniversalParserConfig } from "./aiImportRoutes";
+import aiImportRoutes, {
+  autoDetectPivotFormat,
+  parseIntelligentPivotFormat,
+  UniversalParserConfig,
+} from "./aiImportRoutes";
 import {
   setupAuth,
   isAuthenticated,
@@ -108,6 +112,29 @@ import {
 import { startImport, completeImport, failImport } from "./importState";
 import { registerGlobalValidatorRoutes } from "./globalValidator";
 export { getSizeRank };
+
+// ============================================================
+// IMPORT SAFETY THRESHOLD HELPER
+// ============================================================
+
+function checkSafetyThreshold(
+  dataSource: { name: string; safetyThreshold?: number | null },
+  existingCount: number,
+  newCount: number,
+  logPrefix: string,
+): { blocked: boolean; dropPercent?: number; message?: string } {
+  const threshold = dataSource.safetyThreshold ?? 50;
+  if (threshold === 0 || existingCount <= 0) {
+    return { blocked: false };
+  }
+  const dropPercent = newCount <= 0 ? 100 : ((existingCount - newCount) / existingCount) * 100;
+  if (dropPercent > threshold) {
+    const msg = `SAFETY NET: Item count dropped ${dropPercent.toFixed(0)}% (from ${existingCount} to ${newCount}). Threshold is ${threshold}%. Import blocked to prevent data loss.`;
+    console.error(`[${logPrefix}] SAFETY BLOCK: ${msg}`);
+    return { blocked: true, dropPercent: Math.round(dropPercent), message: msg };
+  }
+  return { blocked: false };
+}
 
 // ============================================================
 // CSV DETECTION AND PARSING HELPERS
@@ -375,12 +402,15 @@ export async function processUrlDataSourceImport(
       raw: false,
     }) as any[][];
 
-    const urlDetectedFormat = urlRawData.length > 0
-      ? autoDetectPivotFormat(urlRawData, dataSource.name, filename)
-      : null;
+    const urlDetectedFormat =
+      urlRawData.length > 0
+        ? autoDetectPivotFormat(urlRawData, dataSource.name, filename)
+        : null;
 
     if (urlDetectedFormat) {
-      console.log(`[URL Import] Shared detector found format: "${urlDetectedFormat}"`);
+      console.log(
+        `[URL Import] Shared detector found format: "${urlDetectedFormat}"`,
+      );
       const universalConfig: UniversalParserConfig = {
         skipRows: (dataSource as any).pivotConfig?.skipRows,
         discontinuedConfig: (dataSource as any).discontinuedConfig,
@@ -412,10 +442,16 @@ export async function processUrlDataSourceImport(
           cleaningConfig.removePatterns?.length > 0 ||
           cleaningConfig.trimWhitespace;
         if (hasAnyCleaning) {
-          console.log(`[URL Import] Applying data source cleaning rules to ${items.length} items`);
+          console.log(
+            `[URL Import] Applying data source cleaning rules to ${items.length} items`,
+          );
           items = items.map((item: any) => ({
             ...item,
-            style: applyCleaningToValue(String(item.style || ""), cleaningConfig, "style"),
+            style: applyCleaningToValue(
+              String(item.style || ""),
+              cleaningConfig,
+              "style",
+            ),
           }));
         }
       }
@@ -427,7 +463,9 @@ export async function processUrlDataSourceImport(
       });
       console.log(`[URL Import] Shared parser extracted ${items.length} items`);
     } else if ((dataSource as any).pivotConfig?.enabled) {
-      console.log(`[URL Import] Using legacy pivoted table parser for ${dataSource.name}`);
+      console.log(
+        `[URL Import] Using legacy pivoted table parser for ${dataSource.name}`,
+      );
       const result = parsePivotedExcelToInventory(
         buffer,
         (dataSource as any).pivotConfig,
@@ -499,7 +537,9 @@ export async function processUrlDataSourceImport(
       // If item has a brand (from store_multibrand vendor column), use brand as prefix
       const prefix = item.brand
         ? String(item.brand).trim()
-        : item.style ? getStylePrefix(item.style) : dataSource.name;
+        : item.style
+          ? getStylePrefix(item.style)
+          : dataSource.name;
       const prefixedStyle = item.style ? `${prefix} ${item.style}` : item.style;
       const normalizedColor = item.color ? toTitleCase(item.color) : item.color;
       const prefixedSku =
@@ -685,20 +725,15 @@ export async function processUrlDataSourceImport(
 
     if (itemsAfterExpansion.length > 0) {
       if (updateStrategy === "full_sync") {
-        // SAFETY NET: Block if item count dropped by more than 50%
-        const existingCount = await storage.getInventoryItemCountByDataSource(dataSourceId);
-        if (existingCount > 20 && itemsAfterExpansion.length > 0) {
-          const dropPercent = ((existingCount - itemsAfterExpansion.length) / existingCount) * 100;
-          if (dropPercent > 50) {
-            console.error(
-              `[URL Import] SAFETY BLOCK: Item count dropped ${dropPercent.toFixed(0)}% (${existingCount} → ${itemsAfterExpansion.length}) for "${dataSource.name}". Import blocked.`,
-            );
-            return {
-              success: false,
-              error: `SAFETY NET: Item count dropped ${dropPercent.toFixed(0)}% (from ${existingCount} to ${itemsAfterExpansion.length}). Import blocked to prevent data loss.`,
-              safetyBlock: true,
-            };
-          }
+        const existingCount =
+          await storage.getInventoryItemCountByDataSource(dataSourceId);
+        const safetyCheck = checkSafetyThreshold(dataSource, existingCount, itemsAfterExpansion.length, "URL Import");
+        if (safetyCheck.blocked) {
+          return {
+            success: false,
+            error: safetyCheck.message,
+            safetyBlock: true,
+          };
         }
         console.log(
           `[URL Import Full Sync] ${dataSource.name}: Starting atomic replace with ${itemsAfterExpansion.length} items`,
@@ -2129,9 +2164,7 @@ function parseExcelToInventory(
  * AND the email fetcher. This ensures identical processing regardless
  * of how files were staged (manual upload or email attachment).
  */
-export async function performCombineImport(
-  dataSourceId: string,
-): Promise<{
+export async function performCombineImport(dataSourceId: string): Promise<{
   success: boolean;
   rowCount: number;
   error?: string;
@@ -2566,7 +2599,9 @@ export async function performCombineImport(
       // If item has a brand (from store_multibrand vendor column), use brand as prefix
       const prefix = brand
         ? brand.trim()
-        : style ? getStylePrefix(style) : dataSource.name;
+        : style
+          ? getStylePrefix(style)
+          : dataSource.name;
       const prefixedStyle = style ? `${prefix} ${style}` : style;
 
       // Rebuild SKU from prefixed style + color + size (matching manual upload handler)
@@ -2911,20 +2946,15 @@ export async function performCombineImport(
 
   if (itemsToImport.length > 0) {
     if (updateStrategy === "full_sync") {
-      // SAFETY NET: Block if item count dropped by more than 50%
-      const existingCount = await storage.getInventoryItemCountByDataSource(dataSourceId);
-      if (existingCount > 20 && itemsToImport.length > 0) {
-        const dropPercent = ((existingCount - itemsToImport.length) / existingCount) * 100;
-        if (dropPercent > 50) {
-          console.error(
-            `[Combine] SAFETY BLOCK: Item count dropped ${dropPercent.toFixed(0)}% (${existingCount} → ${itemsToImport.length}) for "${dataSource.name}". Import blocked.`,
-          );
-          return {
-            success: false,
-            error: `SAFETY NET: Item count dropped ${dropPercent.toFixed(0)}% (from ${existingCount} to ${itemsToImport.length}). Import blocked to prevent data loss.`,
-            safetyBlock: true,
-          };
-        }
+      const existingCount =
+        await storage.getInventoryItemCountByDataSource(dataSourceId);
+      const safetyCheck = checkSafetyThreshold(dataSource, existingCount, itemsToImport.length, "Combine");
+      if (safetyCheck.blocked) {
+        return {
+          success: false,
+          error: safetyCheck.message,
+          safetyBlock: true,
+        };
       }
       console.log(
         `[Combine Full Sync] ${dataSource.name}: Starting atomic replace with ${itemsToImport.length} items`,
@@ -4186,9 +4216,15 @@ export async function registerRoutes(
 
         let detectedFormat: string | null = null;
         if (rawData.length > 0) {
-          detectedFormat = autoDetectPivotFormat(rawData, dataSource.name, file.originalname);
+          detectedFormat = autoDetectPivotFormat(
+            rawData,
+            dataSource.name,
+            file.originalname,
+          );
           if (detectedFormat) {
-            console.log(`[Upload] Shared detector found format: "${detectedFormat}"`);
+            console.log(
+              `[Upload] Shared detector found format: "${detectedFormat}"`,
+            );
             pivotConfig = { enabled: true, format: detectedFormat };
             // Save the detected format for future imports
             await storage.updateDataSource(dataSourceId, {
@@ -4203,9 +4239,14 @@ export async function registerRoutes(
         let items: any[];
 
         // Use shared parsers for all detected pivot/format-specific types
-        if (detectedFormat || (pivotConfig?.format && pivotConfig.format !== "generic_legacy")) {
+        if (
+          detectedFormat ||
+          (pivotConfig?.format && pivotConfig.format !== "generic_legacy")
+        ) {
           const actualFormat = detectedFormat || pivotConfig.format;
-          console.log(`[Upload] Using shared parser for format: "${actualFormat}"`);
+          console.log(
+            `[Upload] Using shared parser for format: "${actualFormat}"`,
+          );
           const universalConfig: UniversalParserConfig = {
             skipRows: pivotConfig?.skipRows,
             discontinuedConfig: (dataSource as any).discontinuedConfig,
@@ -4238,17 +4279,25 @@ export async function registerRoutes(
               uploadCleaningConfig.removePatterns?.length > 0 ||
               uploadCleaningConfig.trimWhitespace;
             if (hasAnyCleaning) {
-              console.log(`[Upload] Applying data source cleaning rules to ${items.length} items`);
+              console.log(
+                `[Upload] Applying data source cleaning rules to ${items.length} items`,
+              );
               items = items.map((item: any) => ({
                 ...item,
-                style: applyCleaningToValue(String(item.style || ""), uploadCleaningConfig, "style"),
+                style: applyCleaningToValue(
+                  String(item.style || ""),
+                  uploadCleaningConfig,
+                  "style",
+                ),
               }));
             }
           }
 
           console.log(`[Upload] Shared parser extracted ${items.length} items`);
         } else if (pivotConfig?.enabled) {
-          console.log(`[Upload] Using legacy pivoted table parser for ${dataSource.name}`);
+          console.log(
+            `[Upload] Using legacy pivoted table parser for ${dataSource.name}`,
+          );
           const result = parsePivotedExcelToInventory(
             file.buffer,
             pivotConfig,
@@ -4738,22 +4787,17 @@ export async function registerRoutes(
 
         if (itemsToImport.length > 0) {
           if (updateStrategy === "full_sync") {
-            // SAFETY NET: Block if item count dropped by more than 50%
-            const existingCount = await storage.getInventoryItemCountByDataSource(dataSourceId);
-            if (existingCount > 20 && itemsToImport.length > 0) {
-              const dropPercent = ((existingCount - itemsToImport.length) / existingCount) * 100;
-              if (dropPercent > 50) {
-                console.error(
-                  `[Import] SAFETY BLOCK: Item count dropped ${dropPercent.toFixed(0)}% (${existingCount} → ${itemsToImport.length}) for "${dataSource.name}". Import blocked.`,
-                );
-                return res.status(400).json({
-                  error: `SAFETY NET: Item count dropped ${dropPercent.toFixed(0)}% (from ${existingCount} to ${itemsToImport.length}). Import blocked to prevent data loss.`,
-                  safetyBlock: true,
-                  existingCount,
-                  newCount: itemsToImport.length,
-                  dropPercent: Math.round(dropPercent),
-                });
-              }
+            const existingCount =
+              await storage.getInventoryItemCountByDataSource(dataSourceId);
+            const safetyCheck = checkSafetyThreshold(dataSource, existingCount, itemsToImport.length, "Import");
+            if (safetyCheck.blocked) {
+              return res.status(400).json({
+                error: safetyCheck.message,
+                safetyBlock: true,
+                existingCount,
+                newCount: itemsToImport.length,
+                dropPercent: safetyCheck.dropPercent,
+              });
             }
             // Full Sync: Atomic delete + insert to guarantee no stale items remain
             console.log(
@@ -5131,12 +5175,15 @@ export async function registerRoutes(
         raw: false,
       }) as any[][];
 
-      const fetchDetectedFormat = fetchRawData.length > 0
-        ? autoDetectPivotFormat(fetchRawData, dataSource.name, urlFilename)
-        : null;
+      const fetchDetectedFormat =
+        fetchRawData.length > 0
+          ? autoDetectPivotFormat(fetchRawData, dataSource.name, urlFilename)
+          : null;
 
       if (fetchDetectedFormat) {
-        console.log(`[URL Fetch] Shared detector found format: "${fetchDetectedFormat}"`);
+        console.log(
+          `[URL Fetch] Shared detector found format: "${fetchDetectedFormat}"`,
+        );
         const universalConfig: UniversalParserConfig = {
           skipRows: (dataSource as any).pivotConfig?.skipRows,
           discontinuedConfig: (dataSource as any).discontinuedConfig,
@@ -5168,17 +5215,27 @@ export async function registerRoutes(
             fetchCleaningConfig.removePatterns?.length > 0 ||
             fetchCleaningConfig.trimWhitespace;
           if (hasAnyCleaning) {
-            console.log(`[URL Fetch] Applying data source cleaning rules to ${items.length} items`);
+            console.log(
+              `[URL Fetch] Applying data source cleaning rules to ${items.length} items`,
+            );
             items = items.map((item: any) => ({
               ...item,
-              style: applyCleaningToValue(String(item.style || ""), fetchCleaningConfig, "style"),
+              style: applyCleaningToValue(
+                String(item.style || ""),
+                fetchCleaningConfig,
+                "style",
+              ),
             }));
           }
         }
 
-        console.log(`[URL Fetch] Shared parser extracted ${items.length} items`);
+        console.log(
+          `[URL Fetch] Shared parser extracted ${items.length} items`,
+        );
       } else if ((dataSource as any).pivotConfig?.enabled) {
-        console.log(`[URL Fetch] Using legacy pivoted table parser for ${dataSource.name}`);
+        console.log(
+          `[URL Fetch] Using legacy pivoted table parser for ${dataSource.name}`,
+        );
         const result = parsePivotedExcelToInventory(
           buffer,
           (dataSource as any).pivotConfig,
@@ -5590,22 +5647,17 @@ export async function registerRoutes(
 
       if (itemsToImport.length > 0) {
         if (updateStrategy === "full_sync") {
-          // SAFETY NET: Block if item count dropped by more than 50%
-          const existingCount = await storage.getInventoryItemCountByDataSource(dataSourceId);
-          if (existingCount > 20 && itemsToImport.length > 0) {
-            const dropPercent = ((existingCount - itemsToImport.length) / existingCount) * 100;
-            if (dropPercent > 50) {
-              console.error(
-                `[URL Fetch] SAFETY BLOCK: Item count dropped ${dropPercent.toFixed(0)}% (${existingCount} → ${itemsToImport.length}) for "${dataSource.name}". Import blocked.`,
-              );
-              return res.status(400).json({
-                error: `SAFETY NET: Item count dropped ${dropPercent.toFixed(0)}% (from ${existingCount} to ${itemsToImport.length}). Import blocked to prevent data loss.`,
-                safetyBlock: true,
-                existingCount,
-                newCount: itemsToImport.length,
-                dropPercent: Math.round(dropPercent),
-              });
-            }
+          const existingCount =
+            await storage.getInventoryItemCountByDataSource(dataSourceId);
+          const safetyCheck = checkSafetyThreshold(dataSource, existingCount, itemsToImport.length, "URL Fetch");
+          if (safetyCheck.blocked) {
+            return res.status(400).json({
+              error: safetyCheck.message,
+              safetyBlock: true,
+              existingCount,
+              newCount: itemsToImport.length,
+              dropPercent: safetyCheck.dropPercent,
+            });
           }
           console.log(
             `[URL Import Full Sync] ${dataSource.name}: Starting atomic replace with ${itemsToImport.length} items`,
@@ -6462,14 +6514,20 @@ export async function registerRoutes(
       const onlyInCache = req.query.onlyInCache === "true";
       const color = (req.query.color as string) || undefined;
       const size = (req.query.size as string) || undefined;
-      const priceMin = req.query.priceMin ? parseFloat(req.query.priceMin as string) : undefined;
-      const priceMax = req.query.priceMax ? parseFloat(req.query.priceMax as string) : undefined;
+      const priceMin = req.query.priceMin
+        ? parseFloat(req.query.priceMin as string)
+        : undefined;
+      const priceMax = req.query.priceMax
+        ? parseFloat(req.query.priceMax as string)
+        : undefined;
       const expandedOnly = req.query.expandedOnly === "true" || undefined;
       const hideExpanded = req.query.hideExpanded === "true" || undefined;
       const hasPrice = (req.query.hasPrice as "yes" | "no") || undefined;
-      const duplicateStylesOnly = req.query.duplicateStylesOnly === "true" || undefined;
+      const duplicateStylesOnly =
+        req.query.duplicateStylesOnly === "true" || undefined;
       const shipDate = (req.query.shipDate as string) || undefined;
-      const sourceType = (req.query.sourceType as "inventory" | "sales") || undefined;
+      const sourceType =
+        (req.query.sourceType as "inventory" | "sales") || undefined;
       const importedAfter = (req.query.importedAfter as string) || undefined;
       const inStoreOnly = req.query.inStoreOnly === "true" || undefined;
 
@@ -6554,7 +6612,9 @@ export async function registerRoutes(
   app.get("/api/inventory/master/colors", async (req, res) => {
     try {
       const dataSourceId = req.query.dataSourceId as string;
-      const colors = await storage.getDistinctInventoryColors(dataSourceId || undefined);
+      const colors = await storage.getDistinctInventoryColors(
+        dataSourceId || undefined,
+      );
       res.json(colors);
     } catch (error) {
       console.error("Error fetching distinct colors:", error);
@@ -6565,7 +6625,9 @@ export async function registerRoutes(
   app.get("/api/inventory/master/sizes", async (req, res) => {
     try {
       const dataSourceId = req.query.dataSourceId as string;
-      const sizes = await storage.getDistinctInventorySizes(dataSourceId || undefined);
+      const sizes = await storage.getDistinctInventorySizes(
+        dataSourceId || undefined,
+      );
       res.json(sizes);
     } catch (error) {
       console.error("Error fetching distinct sizes:", error);
@@ -6576,7 +6638,9 @@ export async function registerRoutes(
   app.get("/api/inventory/master/ship-dates", async (req, res) => {
     try {
       const dataSourceId = req.query.dataSourceId as string;
-      const shipDates = await storage.getDistinctShipDates(dataSourceId || undefined);
+      const shipDates = await storage.getDistinctShipDates(
+        dataSourceId || undefined,
+      );
       res.json(shipDates);
     } catch (error) {
       console.error("Error fetching distinct ship dates:", error);
@@ -6768,7 +6832,8 @@ export async function registerRoutes(
       }
 
       // SAFETY NET: Block empty import or massive drop from deleting all data
-      const existingCount = await storage.getInventoryItemCountByDataSource(dataSourceId);
+      const existingCount =
+        await storage.getInventoryItemCountByDataSource(dataSourceId);
       if (items.length === 0 && existingCount > 0) {
         console.error(
           `[Manual Import] SAFETY BLOCK: Import has 0 items but data source has ${existingCount} existing items. ` +
@@ -6782,19 +6847,16 @@ export async function registerRoutes(
             `This appears to be a corrupted or empty file. Import blocked to protect your data.`,
         });
       }
-      // SAFETY NET: Block if item count dropped by more than 50%
-      if (existingCount > 20 && items.length > 0) {
-        const dropPercent = ((existingCount - items.length) / existingCount) * 100;
-        if (dropPercent > 50) {
-          console.error(
-            `[Manual Import] SAFETY BLOCK: Item count dropped ${dropPercent.toFixed(0)}% (${existingCount} → ${items.length}). Import blocked.`,
-          );
+      const manualDataSource = await storage.getDataSource(dataSourceId);
+      if (manualDataSource) {
+        const safetyCheck = checkSafetyThreshold(manualDataSource, existingCount, items.length, "Manual Import");
+        if (safetyCheck.blocked) {
           return res.status(400).json({
-            error: `SAFETY NET: Item count dropped ${dropPercent.toFixed(0)}% (from ${existingCount} to ${items.length}). Import blocked to prevent data loss.`,
+            error: safetyCheck.message,
             safetyBlock: true,
             existingCount,
             newCount: items.length,
-            dropPercent: Math.round(dropPercent),
+            dropPercent: safetyCheck.dropPercent,
           });
         }
       }
@@ -18014,45 +18076,58 @@ export async function registerRoutes(
 
       // Get data sources with sync status
       const allDataSources = await storage.getDataSources();
-      const dataSourcesWithStats = await Promise.all(allDataSources.map(async (ds) => {
-        const lastSync = ds.lastSync ? new Date(ds.lastSync) : null;
-        const hoursSinceSync = lastSync
-          ? (Date.now() - lastSync.getTime()) / (1000 * 60 * 60)
-          : null;
+      const dataSourcesWithStats = await Promise.all(
+        allDataSources.map(async (ds) => {
+          const lastSync = ds.lastSync ? new Date(ds.lastSync) : null;
+          const hoursSinceSync = lastSync
+            ? (Date.now() - lastSync.getTime()) / (1000 * 60 * 60)
+            : null;
 
-        let status: "active" | "pending" | "stale" | "error" = "active";
-        if (!lastSync) {
-          status = "pending";
-        } else if (hoursSinceSync && hoursSinceSync > 168) {
-          status = "stale";
-        }
+          let status: "active" | "pending" | "stale" | "error" = "active";
+          if (!lastSync) {
+            status = "pending";
+          } else if (hoursSinceSync && hoursSinceSync > 168) {
+            status = "stale";
+          }
 
-        const isAutoSync =
-          ds.type === "email" || (ds.connectionDetails as any)?.autoSync;
+          const isAutoSync =
+            ds.type === "email" || (ds.connectionDetails as any)?.autoSync;
 
-        const [fileCountResult] = await db.select({ count: count() }).from(uploadedFiles).where(eq(uploadedFiles.dataSourceId, ds.id));
-        const [itemCountResult] = await db.select({ count: count() }).from(inventoryItems).where(eq(inventoryItems.dataSourceId, ds.id));
-        const [lastImportLog] = await db.select({
-          status: importLogs.status,
-          importType: importLogs.importType,
-          itemsImported: importLogs.itemsImported,
-          startedAt: importLogs.startedAt,
-          errorMessage: importLogs.errorMessage,
-        }).from(importLogs).where(eq(importLogs.dataSourceId, ds.id)).orderBy(desc(importLogs.startedAt)).limit(1);
+          const [fileCountResult] = await db
+            .select({ count: count() })
+            .from(uploadedFiles)
+            .where(eq(uploadedFiles.dataSourceId, ds.id));
+          const [itemCountResult] = await db
+            .select({ count: count() })
+            .from(inventoryItems)
+            .where(eq(inventoryItems.dataSourceId, ds.id));
+          const [lastImportLog] = await db
+            .select({
+              status: importLogs.status,
+              importType: importLogs.importType,
+              itemsImported: importLogs.itemsImported,
+              startedAt: importLogs.startedAt,
+              errorMessage: importLogs.errorMessage,
+            })
+            .from(importLogs)
+            .where(eq(importLogs.dataSourceId, ds.id))
+            .orderBy(desc(importLogs.startedAt))
+            .limit(1);
 
-        return {
-          id: ds.id,
-          name: ds.name,
-          type: ds.type,
-          status,
-          isAutoSync,
-          lastSync: ds.lastSync,
-          hoursSinceSync: hoursSinceSync ? Math.round(hoursSinceSync) : null,
-          fileCount: fileCountResult?.count || 0,
-          itemCount: itemCountResult?.count || 0,
-          lastImport: lastImportLog || null,
-        };
-      }));
+          return {
+            id: ds.id,
+            name: ds.name,
+            type: ds.type,
+            status,
+            isAutoSync,
+            lastSync: ds.lastSync,
+            hoursSinceSync: hoursSinceSync ? Math.round(hoursSinceSync) : null,
+            fileCount: fileCountResult?.count || 0,
+            itemCount: itemCountResult?.count || 0,
+            lastImport: lastImportLog || null,
+          };
+        }),
+      );
       const dataSources = dataSourcesWithStats;
 
       // Get Shopify store status
@@ -18428,22 +18503,39 @@ export async function registerRoutes(
       };
 
       // Import health stats
-      const importHealthRows = await db.select({
-        status: importLogs.status,
-        cnt: count(),
-      }).from(importLogs).groupBy(importLogs.status);
+      const importHealthRows = await db
+        .select({
+          status: importLogs.status,
+          cnt: count(),
+        })
+        .from(importLogs)
+        .groupBy(importLogs.status);
       const importHealthMap: Record<string, number> = {};
-      importHealthRows.forEach(r => { importHealthMap[r.status] = Number(r.cnt); });
-      const totalImportRuns = Object.values(importHealthMap).reduce((a, b) => a + b, 0);
-      const successfulImportRuns = importHealthMap['success'] || 0;
-      const importSuccessRate = totalImportRuns > 0 ? Math.round((successfulImportRuns / totalImportRuns) * 100) : 100;
+      importHealthRows.forEach((r) => {
+        importHealthMap[r.status] = Number(r.cnt);
+      });
+      const totalImportRuns = Object.values(importHealthMap).reduce(
+        (a, b) => a + b,
+        0,
+      );
+      const successfulImportRuns = importHealthMap["success"] || 0;
+      const importSuccessRate =
+        totalImportRuns > 0
+          ? Math.round((successfulImportRuns / totalImportRuns) * 100)
+          : 100;
 
       // How many data sources have items vs total
-      const dsWithItems = dataSourcesWithStats.filter((ds: any) => Number(ds.itemCount) > 0).length;
-      const dsWithImportLog = dataSourcesWithStats.filter((ds: any) => ds.lastImport !== null).length;
+      const dsWithItems = dataSourcesWithStats.filter(
+        (ds: any) => Number(ds.itemCount) > 0,
+      ).length;
+      const dsWithImportLog = dataSourcesWithStats.filter(
+        (ds: any) => ds.lastImport !== null,
+      ).length;
 
       // Total inventory items count
-      const [totalItemsResult] = await db.select({ count: count() }).from(inventoryItems);
+      const [totalItemsResult] = await db
+        .select({ count: count() })
+        .from(inventoryItems);
       const totalInventoryItems = Number(totalItemsResult?.count || 0);
 
       // Recent AI actions (color corrections)
@@ -18512,7 +18604,7 @@ export async function registerRoutes(
         importHealth: {
           totalImportRuns: totalImportRuns,
           successfulRuns: successfulImportRuns,
-          failedRuns: importHealthMap['failed'] || 0,
+          failedRuns: importHealthMap["failed"] || 0,
           successRate: importSuccessRate,
           dataSourcesWithItems: dsWithItems,
           dataSourcesImported: dsWithImportLog,
@@ -21812,7 +21904,10 @@ export async function registerRoutes(
 
   app.patch("/api/om/orders/:id", async (req, res) => {
     try {
-      const updated = await storage.updateOrder(parseInt(req.params.id), req.body);
+      const updated = await storage.updateOrder(
+        parseInt(req.params.id),
+        req.body,
+      );
       if (!updated) return res.status(404).json({ error: "Order not found" });
       res.json(updated);
     } catch (error: any) {
@@ -21861,11 +21956,13 @@ export async function registerRoutes(
 
       res.json({ message: "Order sync started" });
 
-      fetchShopifyOrders(store.id, { sinceDate, limit }).then((result) => {
-        console.log(`[OrderSync] Finished: ${result.synced} orders synced`);
-      }).catch((err) => {
-        console.error("[OrderSync] Background sync failed:", err);
-      });
+      fetchShopifyOrders(store.id, { sinceDate, limit })
+        .then((result) => {
+          console.log(`[OrderSync] Finished: ${result.synced} orders synced`);
+        })
+        .catch((err) => {
+          console.error("[OrderSync] Background sync failed:", err);
+        });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
@@ -21914,8 +22011,11 @@ export async function registerRoutes(
 
   app.get("/api/om/hang-tags/:id", async (req, res) => {
     try {
-      const template = await storage.getHangTagTemplate(parseInt(req.params.id));
-      if (!template) return res.status(404).json({ error: "Template not found" });
+      const template = await storage.getHangTagTemplate(
+        parseInt(req.params.id),
+      );
+      if (!template)
+        return res.status(404).json({ error: "Template not found" });
       res.json(template);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -21933,8 +22033,12 @@ export async function registerRoutes(
 
   app.patch("/api/om/hang-tags/:id", async (req, res) => {
     try {
-      const template = await storage.updateHangTagTemplate(parseInt(req.params.id), req.body);
-      if (!template) return res.status(404).json({ error: "Template not found" });
+      const template = await storage.updateHangTagTemplate(
+        parseInt(req.params.id),
+        req.body,
+      );
+      if (!template)
+        return res.status(404).json({ error: "Template not found" });
       res.json(template);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -21943,8 +22047,11 @@ export async function registerRoutes(
 
   app.delete("/api/om/hang-tags/:id", async (req, res) => {
     try {
-      const deleted = await storage.deleteHangTagTemplate(parseInt(req.params.id));
-      if (!deleted) return res.status(404).json({ error: "Template not found" });
+      const deleted = await storage.deleteHangTagTemplate(
+        parseInt(req.params.id),
+      );
+      if (!deleted)
+        return res.status(404).json({ error: "Template not found" });
       res.json({ success: true });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -21977,8 +22084,12 @@ export async function registerRoutes(
 
   app.patch("/api/om/discounts/:id", async (req, res) => {
     try {
-      const discount = await storage.updateDiscountCode(parseInt(req.params.id), req.body);
-      if (!discount) return res.status(404).json({ error: "Discount not found" });
+      const discount = await storage.updateDiscountCode(
+        parseInt(req.params.id),
+        req.body,
+      );
+      if (!discount)
+        return res.status(404).json({ error: "Discount not found" });
       res.json(discount);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -21988,7 +22099,8 @@ export async function registerRoutes(
   app.delete("/api/om/discounts/:id", async (req, res) => {
     try {
       const deleted = await storage.deleteDiscountCode(parseInt(req.params.id));
-      if (!deleted) return res.status(404).json({ error: "Discount not found" });
+      if (!deleted)
+        return res.status(404).json({ error: "Discount not found" });
       res.json({ success: true });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -22017,8 +22129,12 @@ export async function registerRoutes(
 
   app.patch("/api/om/email-templates/:id", async (req, res) => {
     try {
-      const template = await storage.updateEmailTemplate(parseInt(req.params.id), req.body);
-      if (!template) return res.status(404).json({ error: "Template not found" });
+      const template = await storage.updateEmailTemplate(
+        parseInt(req.params.id),
+        req.body,
+      );
+      if (!template)
+        return res.status(404).json({ error: "Template not found" });
       res.json(template);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -22027,8 +22143,11 @@ export async function registerRoutes(
 
   app.delete("/api/om/email-templates/:id", async (req, res) => {
     try {
-      const deleted = await storage.deleteEmailTemplate(parseInt(req.params.id));
-      if (!deleted) return res.status(404).json({ error: "Template not found" });
+      const deleted = await storage.deleteEmailTemplate(
+        parseInt(req.params.id),
+      );
+      if (!deleted)
+        return res.status(404).json({ error: "Template not found" });
       res.json({ success: true });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -22061,8 +22180,12 @@ export async function registerRoutes(
 
   app.patch("/api/om/shipments/:id", async (req, res) => {
     try {
-      const shipment = await storage.updateShipment(parseInt(req.params.id), req.body);
-      if (!shipment) return res.status(404).json({ error: "Shipment not found" });
+      const shipment = await storage.updateShipment(
+        parseInt(req.params.id),
+        req.body,
+      );
+      if (!shipment)
+        return res.status(404).json({ error: "Shipment not found" });
       res.json(shipment);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
