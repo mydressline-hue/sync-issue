@@ -15,7 +15,7 @@ import {
   deduplicateAndZeroFutureStock,
 } from "./inventoryProcessing";
 import { startImport, completeImport, failImport } from "./importState";
-import { executeImport } from "./importEngine-NEW";
+import { executeImport, calculateItemStockInfo, getStockInfoRule, getStylePrefix, toTitleCase } from "./importEngine";
 
 // Re-export shared processing functions for backward compatibility
 export {
@@ -2601,38 +2601,6 @@ export async function combineAndImportStagedFiles(
       `[Combine] Starting combine for "${dataSource.name}" with ${stagedFiles.length} staged files`,
     );
 
-    // ---- Helper: get prefix for a style (matches routes.ts exactly) ----
-    const getStylePrefix = (style: string): string => {
-      const cleaningConfig = dataSource.cleaningConfig as any;
-      if (
-        cleaningConfig?.useCustomPrefixes &&
-        cleaningConfig?.stylePrefixRules?.length > 0
-      ) {
-        for (const rule of cleaningConfig.stylePrefixRules) {
-          if (rule.pattern && rule.prefix) {
-            try {
-              const regex = new RegExp(rule.pattern, "i");
-              if (regex.test(style)) {
-                return rule.prefix;
-              }
-            } catch (e) {
-              if (style.toLowerCase().startsWith(rule.pattern.toLowerCase())) {
-                return rule.prefix;
-              }
-            }
-          }
-        }
-      }
-      let prefix = dataSource.name;
-      if ((dataSource as any).sourceType === "sales") {
-        const saleMatch = prefix.match(/^(.+?)\s*(Sale|Sales)$/i);
-        if (saleMatch) {
-          prefix = saleMatch[1].trim();
-        }
-      }
-      return prefix;
-    };
-
     // ---- Combine items from all staged files (SAME as routes.ts) ----
     const allItems: any[] = [];
     let allRows: any[][] = [];
@@ -2955,7 +2923,7 @@ export async function combineAndImportStagedFiles(
         }
 
         // Apply prefix and push item (matches routes.ts exactly)
-        const prefix = style ? getStylePrefix(style) : dataSource.name;
+        const prefix = style ? getStylePrefix(style, dataSource, cleaningConfig) : dataSource.name;
         allItems.push({
           dataSourceId,
           saleOwnsStyle: isSaleFile,
@@ -3252,7 +3220,7 @@ export async function combineAndImportStagedFiles(
     }
 
     // ---- Step 7: Calculate stockInfo (matches routes.ts exactly) ----
-    const stockInfoRule = await getStockInfoRuleForEmail(dataSource, storage);
+    const stockInfoRule = await getStockInfoRule(dataSource);
     if (stockInfoRule) {
       cLog(
         `[Combine] Calculating stockInfo for ${itemsToImport.length} items using rule: "${stockInfoRule.name}"`,
@@ -3593,180 +3561,6 @@ export async function removeDiscontinuedInventoryItems(
   }
 
   return 0;
-}
-
-// ============================================================
-// STOCK INFO CALCULATION HELPERS
-// Calculates stock message for each item based on stockInfoConfig
-// (Copied from routes.ts to avoid circular dependency)
-// ============================================================
-
-function calculateItemStockInfo(item: any, stockInfoRule: any): string | null {
-  if (!stockInfoRule) {
-    return null;
-  }
-
-  const stock = item.stock || 0;
-  const shipDate = item.shipDate;
-  const isExpandedSize = item.isExpandedSize || false;
-  const threshold = stockInfoRule.stockThreshold || 0;
-
-  // Priority 1: Expanded size
-  if (isExpandedSize && stockInfoRule.sizeExpansionMessage) {
-    return stockInfoRule.sizeExpansionMessage;
-  }
-
-  // Priority 2: In stock - ALWAYS takes priority over future date
-  if (stock > threshold) {
-    return stockInfoRule.inStockMessage;
-  }
-
-  // Priority 3: Has future date - ONLY for zero/low stock items
-  if (shipDate && stockInfoRule.futureDateMessage) {
-    try {
-      const dateStr = String(shipDate).trim();
-      let targetDate: Date;
-
-      const isoMatch = dateStr.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
-      const usMatch = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-      const usShortMatch = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2})$/);
-
-      if (isoMatch) {
-        const [, year, month, day] = isoMatch;
-        targetDate = new Date(
-          parseInt(year),
-          parseInt(month) - 1,
-          parseInt(day),
-        );
-      } else if (usMatch) {
-        const [, month, day, year] = usMatch;
-        targetDate = new Date(
-          parseInt(year),
-          parseInt(month) - 1,
-          parseInt(day),
-        );
-      } else if (usShortMatch) {
-        const [, month, day, shortYear] = usShortMatch;
-        targetDate = new Date(
-          2000 + parseInt(shortYear),
-          parseInt(month) - 1,
-          parseInt(day),
-        );
-      } else {
-        targetDate = new Date(dateStr);
-      }
-
-      const offsetDays = stockInfoRule.dateOffsetDays || 0;
-      if (offsetDays !== 0) {
-        targetDate.setDate(targetDate.getDate() + offsetDays);
-      }
-
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      targetDate.setHours(0, 0, 0, 0);
-
-      if (targetDate > today) {
-        const formattedDate = targetDate.toLocaleDateString("en-US", {
-          month: "long",
-          day: "numeric",
-          year: "numeric",
-        });
-        return stockInfoRule.futureDateMessage.replace(
-          /\{date\}/gi,
-          formattedDate,
-        );
-      }
-    } catch (e) {
-      console.error(`[Email Import] Failed to parse date: ${shipDate}`, e);
-    }
-  }
-
-  // Priority 4: Out of stock
-  let outOfStockMsg = stockInfoRule.outOfStockMessage;
-  if (outOfStockMsg && outOfStockMsg.includes("{date}")) {
-    outOfStockMsg = outOfStockMsg
-      .replace(/\{date\}/gi, "")
-      .replace(/\s+/g, " ")
-      .trim();
-  }
-  return outOfStockMsg || null;
-}
-
-async function getStockInfoRuleForEmail(
-  dataSource: any,
-  storageRef: any,
-): Promise<any> {
-  let stockInfoRule: any = null;
-
-  try {
-    const stockInfoConfig = (dataSource as any).stockInfoConfig;
-
-    const hasStockInfoMessages =
-      stockInfoConfig &&
-      (stockInfoConfig.message1InStock ||
-        stockInfoConfig.message2ExtraSizes ||
-        stockInfoConfig.message3Default ||
-        stockInfoConfig.message4FutureDate);
-
-    if (hasStockInfoMessages) {
-      stockInfoRule = {
-        id: "ai-importer-config",
-        name: "AI Importer Stock Info Config",
-        stockThreshold: 0,
-        inStockMessage: stockInfoConfig.message1InStock || "",
-        sizeExpansionMessage: stockInfoConfig.message2ExtraSizes || null,
-        outOfStockMessage: stockInfoConfig.message3Default || "",
-        futureDateMessage: stockInfoConfig.message4FutureDate || null,
-        dateOffsetDays: stockInfoConfig.dateOffsetDays ?? 0,
-        enabled: true,
-      };
-      console.log(
-        `[Email Import] Using stockInfoConfig: inStock="${stockInfoRule.inStockMessage}"`,
-      );
-    } else {
-      const metafieldRules =
-        await storageRef.getShopifyMetafieldRulesByDataSource(dataSource.id);
-
-      const activeDbRule = metafieldRules.find((r: any) => r.enabled !== false);
-
-      if (activeDbRule) {
-        stockInfoRule = {
-          id: activeDbRule.id,
-          name: activeDbRule.name || "Rule Engine Metafield Rule",
-          stockThreshold:
-            activeDbRule.stockThreshold ?? activeDbRule.stock_threshold ?? 0,
-          inStockMessage:
-            activeDbRule.inStockMessage || activeDbRule.in_stock_message || "",
-          sizeExpansionMessage:
-            activeDbRule.sizeExpansionMessage ||
-            activeDbRule.size_expansion_message ||
-            null,
-          outOfStockMessage:
-            activeDbRule.outOfStockMessage ||
-            activeDbRule.out_of_stock_message ||
-            "",
-          futureDateMessage:
-            activeDbRule.futureDateMessage ||
-            activeDbRule.future_date_message ||
-            null,
-          dateOffsetDays:
-            activeDbRule.dateOffsetDays ?? activeDbRule.date_offset_days ?? 0,
-          enabled: true,
-        };
-        console.log(
-          `[Email Import] Using Rule Engine metafield rule: inStock="${stockInfoRule.inStockMessage}"`,
-        );
-      } else {
-        console.log(
-          `[Email Import] No stockInfoConfig AND no metafield rules - stockInfo will be null`,
-        );
-      }
-    }
-  } catch (ruleError) {
-    console.error(`[Email Import] Failed to get stock info rules:`, ruleError);
-  }
-
-  return stockInfoRule;
 }
 
 // ============================================================

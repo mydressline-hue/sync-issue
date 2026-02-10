@@ -98,6 +98,7 @@ import {
   filterDiscontinuedStyles,
   removeDiscontinuedInventoryItems,
   checkSaleImportFirstRequirement,
+  applyCleaningToValue,
 } from "./importUtils";
 import {
   cleanInventoryData,
@@ -111,31 +112,8 @@ import {
 } from "./inventoryProcessing";
 import { startImport, completeImport, failImport } from "./importState";
 import { registerGlobalValidatorRoutes } from "./globalValidator";
-import { executeImport } from "./importEngine-NEW";
+import { executeImport, calculateItemStockInfo, getStockInfoRule, getStylePrefix, checkSafetyThreshold, toTitleCase } from "./importEngine";
 export { getSizeRank };
-
-// ============================================================
-// IMPORT SAFETY THRESHOLD HELPER
-// ============================================================
-
-function checkSafetyThreshold(
-  dataSource: { name: string; safetyThreshold?: number | null },
-  existingCount: number,
-  newCount: number,
-  logPrefix: string,
-): { blocked: boolean; dropPercent?: number; message?: string } {
-  const threshold = dataSource.safetyThreshold ?? 50;
-  if (threshold === 0 || existingCount <= 0) {
-    return { blocked: false };
-  }
-  const dropPercent = newCount <= 0 ? 100 : ((existingCount - newCount) / existingCount) * 100;
-  if (dropPercent > threshold) {
-    const msg = `SAFETY NET: Item count dropped ${dropPercent.toFixed(0)}% (from ${existingCount} to ${newCount}). Threshold is ${threshold}%. Import blocked to prevent data loss.`;
-    console.error(`[${logPrefix}] SAFETY BLOCK: ${msg}`);
-    return { blocked: true, dropPercent: Math.round(dropPercent), message: msg };
-  }
-  return { blocked: false };
-}
 
 // ============================================================
 // CSV DETECTION AND PARSING HELPERS
@@ -384,77 +362,6 @@ export async function processUrlDataSourceImport(
 
 // Configure multer for file uploads
 const upload = multer({ storage: multer.memoryStorage() });
-
-// Helper function to apply cleaning config to Style column only
-function applyCleaningToValue(
-  value: string,
-  config: any,
-  field: string,
-): string {
-  if (!value || typeof value !== "string") return value;
-
-  let cleaned = value;
-
-  // Trim whitespace
-  if (config?.trimWhitespace) {
-    cleaned = cleaned.trim();
-  }
-
-  // Remove letters from Style
-  if (config?.removeLetters) {
-    cleaned = cleaned.replace(/[a-zA-Z]/g, "");
-  }
-
-  // Remove numbers from Style
-  if (config?.removeNumbers) {
-    cleaned = cleaned.replace(/[0-9]/g, "");
-  }
-
-  // Remove special characters from Style
-  if (config?.removeSpecialChars) {
-    cleaned = cleaned.replace(/[^a-zA-Z0-9\s]/g, "");
-  }
-
-  // Remove first N characters from Style
-  if (config?.removeFirstN && config.removeFirstN > 0) {
-    cleaned = cleaned.substring(config.removeFirstN);
-  }
-
-  // Remove last N characters from Style
-  if (config?.removeLastN && config.removeLastN > 0) {
-    cleaned = cleaned.substring(0, cleaned.length - config.removeLastN);
-  }
-
-  // Find and replace text in Style
-  if (config?.findText && config.findText.length > 0) {
-    const regex = new RegExp(config.findText, "gi");
-    cleaned = cleaned.replace(regex, config.replaceText || "");
-  }
-
-  // Process multiple find/replace rules (array)
-  if (config?.findReplaceRules && Array.isArray(config.findReplaceRules)) {
-    for (const rule of config.findReplaceRules) {
-      if (rule.find && rule.find.length > 0) {
-        const regex = new RegExp(rule.find, "gi");
-        cleaned = cleaned.replace(regex, rule.replace || "");
-      }
-    }
-  }
-
-  // Remove specific patterns/words from Style
-  if (config?.removePatterns && Array.isArray(config.removePatterns)) {
-    for (const pattern of config.removePatterns) {
-      if (pattern && pattern.length > 0) {
-        // Escape special regex characters and replace all occurrences
-        const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        const regex = new RegExp(escaped, "gi");
-        cleaned = cleaned.replace(regex, "");
-      }
-    }
-  }
-
-  return cleaned.trim();
-}
 
 // Helper function to detect and parse Tarik Ediz pivoted format
 function parseTarikEdizFormat(
@@ -1211,189 +1118,6 @@ function parseGenericPivotedFormat(
   };
 }
 
-// ============================================================
-// STOCK INFO CALCULATION HELPER
-// Calculates stock message for each item based on stockInfoConfig
-// ============================================================
-function calculateItemStockInfo(item: any, stockInfoRule: any): string | null {
-  if (!stockInfoRule) {
-    return null;
-  }
-
-  const stock = item.stock || 0;
-  const shipDate = item.shipDate;
-  const isExpandedSize = item.isExpandedSize || false;
-  const threshold = stockInfoRule.stockThreshold || 0;
-
-  // Priority 1: Expanded size
-  if (isExpandedSize && stockInfoRule.sizeExpansionMessage) {
-    return stockInfoRule.sizeExpansionMessage;
-  }
-
-  // Priority 2: In stock - ALWAYS takes priority over future date
-  // Items with stock > threshold get IN STOCK message regardless of shipDate
-  if (stock > threshold) {
-    return stockInfoRule.inStockMessage;
-  }
-
-  // Priority 3: Has future date - ONLY for zero/low stock items
-  // Items with stock <= threshold AND a future shipDate get the future date message
-  if (shipDate && stockInfoRule.futureDateMessage) {
-    try {
-      const dateStr = String(shipDate).trim();
-      let targetDate: Date;
-
-      // Parse ISO format: YYYY-MM-DD
-      const isoMatch = dateStr.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
-      // Parse US format: M/D/YYYY
-      const usMatch = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-      // Parse US short format: M/D/YY
-      const usShortMatch = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2})$/);
-
-      if (isoMatch) {
-        const [, year, month, day] = isoMatch;
-        targetDate = new Date(
-          parseInt(year),
-          parseInt(month) - 1,
-          parseInt(day),
-        );
-      } else if (usMatch) {
-        const [, month, day, year] = usMatch;
-        targetDate = new Date(
-          parseInt(year),
-          parseInt(month) - 1,
-          parseInt(day),
-        );
-      } else if (usShortMatch) {
-        const [, month, day, shortYear] = usShortMatch;
-        targetDate = new Date(
-          2000 + parseInt(shortYear),
-          parseInt(month) - 1,
-          parseInt(day),
-        );
-      } else {
-        targetDate = new Date(dateStr);
-      }
-
-      // Apply offset days (supports negative values to pull dates back)
-      const offsetDays = stockInfoRule.dateOffsetDays || 0;
-      if (offsetDays !== 0) {
-        targetDate.setDate(targetDate.getDate() + offsetDays);
-      }
-
-      // Check if future
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      targetDate.setHours(0, 0, 0, 0);
-
-      if (targetDate > today) {
-        const formattedDate = targetDate.toLocaleDateString("en-US", {
-          month: "long",
-          day: "numeric",
-          year: "numeric",
-        });
-        return stockInfoRule.futureDateMessage.replace(
-          /\{date\}/gi,
-          formattedDate,
-        );
-      }
-    } catch (e) {
-      console.error(`[Import] Failed to parse date: ${shipDate}`, e);
-    }
-  }
-
-  // Priority 4: Out of stock
-  let outOfStockMsg = stockInfoRule.outOfStockMessage;
-  if (outOfStockMsg && outOfStockMsg.includes("{date}")) {
-    outOfStockMsg = outOfStockMsg
-      .replace(/\{date\}/gi, "")
-      .replace(/\s+/g, " ")
-      .trim();
-  }
-  return outOfStockMsg || null;
-}
-
-// Helper function to get stockInfoRule from data source config
-async function getStockInfoRule(dataSource: any, storage: any): Promise<any> {
-  let stockInfoRule: any = null;
-
-  try {
-    const stockInfoConfig = (dataSource as any).stockInfoConfig;
-
-    // Check if stockInfoConfig has ANY actual messages configured
-    const hasStockInfoMessages =
-      stockInfoConfig &&
-      (stockInfoConfig.message1InStock ||
-        stockInfoConfig.message2ExtraSizes ||
-        stockInfoConfig.message3Default ||
-        stockInfoConfig.message4FutureDate);
-
-    if (hasStockInfoMessages) {
-      // Use AI Importer settings - these take priority
-      stockInfoRule = {
-        id: "ai-importer-config",
-        name: "AI Importer Stock Info Config",
-        stockThreshold: 0,
-        inStockMessage: stockInfoConfig.message1InStock || "",
-        sizeExpansionMessage: stockInfoConfig.message2ExtraSizes || null,
-        outOfStockMessage: stockInfoConfig.message3Default || "",
-        futureDateMessage: stockInfoConfig.message4FutureDate || null,
-        dateOffsetDays: stockInfoConfig.dateOffsetDays ?? 0,
-        enabled: true,
-      };
-      console.log(
-        `[Import] Using stockInfoConfig: inStock="${stockInfoRule.inStockMessage}"`,
-      );
-    } else {
-      // Fallback to Rule Engine metafield rules
-      const metafieldRules = await storage.getShopifyMetafieldRulesByDataSource(
-        dataSource.id,
-      );
-
-      // Use first enabled rule
-      const activeDbRule = metafieldRules.find((r: any) => r.enabled !== false);
-
-      if (activeDbRule) {
-        // Normalize database rule to handle both snake_case and camelCase
-        stockInfoRule = {
-          id: activeDbRule.id,
-          name: activeDbRule.name || "Rule Engine Metafield Rule",
-          stockThreshold:
-            activeDbRule.stockThreshold ?? activeDbRule.stock_threshold ?? 0,
-          inStockMessage:
-            activeDbRule.inStockMessage || activeDbRule.in_stock_message || "",
-          sizeExpansionMessage:
-            activeDbRule.sizeExpansionMessage ||
-            activeDbRule.size_expansion_message ||
-            null,
-          outOfStockMessage:
-            activeDbRule.outOfStockMessage ||
-            activeDbRule.out_of_stock_message ||
-            "",
-          futureDateMessage:
-            activeDbRule.futureDateMessage ||
-            activeDbRule.future_date_message ||
-            null,
-          dateOffsetDays:
-            activeDbRule.dateOffsetDays ?? activeDbRule.date_offset_days ?? 0,
-          enabled: true,
-        };
-        console.log(
-          `[Import] Using Rule Engine metafield rule: inStock="${stockInfoRule.inStockMessage}"`,
-        );
-      } else {
-        console.log(
-          `[Import] No stockInfoConfig AND no metafield rules - stockInfo will be null`,
-        );
-      }
-    }
-  } catch (ruleError) {
-    console.error(`[Import] Failed to get stock info rules:`, ruleError);
-  }
-
-  return stockInfoRule;
-}
-
 // Helper function to parse Excel file and extract inventory items
 function parseExcelToInventory(
   buffer: Buffer,
@@ -1776,38 +1500,6 @@ export async function performCombineImport(dataSourceId: string): Promise<{
     `[performCombineImport] Found ${stagedFiles.length} staged files`,
   );
 
-  // Helper function to get prefix for a style
-  const getStylePrefix = (style: string): string => {
-    const cleaningConfig = dataSource.cleaningConfig as any;
-    if (
-      cleaningConfig?.useCustomPrefixes &&
-      cleaningConfig?.stylePrefixRules?.length > 0
-    ) {
-      for (const rule of cleaningConfig.stylePrefixRules) {
-        if (rule.pattern && rule.prefix) {
-          try {
-            const regex = new RegExp(rule.pattern, "i");
-            if (regex.test(style)) {
-              return rule.prefix;
-            }
-          } catch (e) {
-            if (style.toLowerCase().startsWith(rule.pattern.toLowerCase())) {
-              return rule.prefix;
-            }
-          }
-        }
-      }
-    }
-    let prefix = dataSource.name;
-    if ((dataSource as any).sourceType === "sales") {
-      const saleMatch = prefix.match(/^(.+?)\s*(Sale|Sales)$/i);
-      if (saleMatch) {
-        prefix = saleMatch[1].trim();
-      }
-    }
-    return prefix;
-  };
-
   // Combine items from all staged files
   const allItems: any[] = [];
   let allRows: any[][] = [];
@@ -2181,14 +1873,11 @@ export async function performCombineImport(dataSourceId: string): Promise<{
       const prefix = brand
         ? brand.trim()
         : style
-          ? getStylePrefix(style)
+          ? getStylePrefix(style, dataSource, cleaningConfig)
           : dataSource.name;
       const prefixedStyle = style ? `${prefix} ${style}` : style;
 
       // Rebuild SKU from prefixed style + color + size (matching manual upload handler)
-      // This ensures consistent format: "Portia & Scarlett MP25001-BL-06" → "Portia-&-Scarlett-MP25001-BL-06-Default-06"
-      const toTitleCase = (str: string): string =>
-        str.toLowerCase().replace(/(?:^|[\s\-\/&])\S/g, (a) => a.toUpperCase());
       const normalizedColor = color ? toTitleCase(color) : color;
       const rebuiltSku =
         prefixedStyle && normalizedColor && size != null && size !== ""
@@ -4128,48 +3817,6 @@ export async function registerRoutes(
 
       // Helper function to get prefix for a style
       // For sale files, strips "Sale" or "Sales" from the prefix to match regular file naming
-      const getStylePrefix = (style: string): string => {
-        const cleaningConfig = dataSource.cleaningConfig as any;
-
-        if (
-          cleaningConfig?.useCustomPrefixes &&
-          cleaningConfig?.stylePrefixRules?.length > 0
-        ) {
-          for (const rule of cleaningConfig.stylePrefixRules) {
-            if (rule.pattern && rule.prefix) {
-              try {
-                // Use regex matching (case-insensitive)
-                const regex = new RegExp(rule.pattern, "i");
-                if (regex.test(style)) {
-                  return rule.prefix;
-                }
-              } catch (e) {
-                // Invalid regex, try literal match as fallback
-                if (
-                  style.toLowerCase().startsWith(rule.pattern.toLowerCase())
-                ) {
-                  return rule.prefix;
-                }
-              }
-            }
-          }
-        }
-
-        // Fall back to data source name
-        let prefix = dataSource.name;
-
-        // For sale files, strip "Sale" or "Sales" suffix from the prefix
-        // This ensures "Jovani Sale 12345" becomes "Jovani 12345" (matching the regular file)
-        if ((dataSource as any).sourceType === "sales") {
-          const saleMatch = prefix.match(/^(.+?)\s*(Sale|Sales)$/i);
-          if (saleMatch) {
-            prefix = saleMatch[1].trim();
-          }
-        }
-
-        return prefix;
-      };
-
       // Re-apply cleaning to raw data and re-import
       const cleaningConfig = (dataSource.cleaningConfig as any) || {};
       const inventoryItems = existingItems.map((item) => {
@@ -4202,7 +3849,7 @@ export async function registerRoutes(
         const prefix = item.brand
           ? String(item.brand).trim()
           : cleanedStyle
-            ? getStylePrefix(cleanedStyle)
+            ? getStylePrefix(cleanedStyle, dataSource, cleaningConfig)
             : dataSource.name;
 
         return {
@@ -4319,7 +3966,7 @@ export async function registerRoutes(
       );
       itemsAfterExpansion = dedupResultReimport.items;
 
-      const stockInfoRuleReimport = await getStockInfoRule(dataSource, storage);
+      const stockInfoRuleReimport = await getStockInfoRule(dataSource);
       if (stockInfoRuleReimport) {
         console.log(
           `[Reimport] Calculating stockInfo for ${itemsAfterExpansion.length} items using rule: "${stockInfoRuleReimport.name}"`,

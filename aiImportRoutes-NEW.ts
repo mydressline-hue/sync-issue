@@ -47,7 +47,7 @@ import {
   removeDiscontinuedInventoryItems,
   applyCleaningToValue,
 } from "./importUtils";
-import { executeImport } from "./importEngine-NEW";
+import { executeImport } from "./importEngine";
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage() });

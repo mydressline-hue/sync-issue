@@ -1,5 +1,5 @@
 /**
- * importEngine-NEW.ts — Unified Import Engine
+ * importEngine.ts — Unified Import Engine
  *
  * ALL import paths (manual upload, email, URL, combine, AI import) call
  * the single `executeImport()` function, ensuring every item passes through
@@ -111,7 +111,7 @@ export interface ImportStats {
 // FROM: routes (29).ts line 1637 (canonical version — superset of all 3 copies)
 // ============================================================
 
-function calculateItemStockInfo(
+export function calculateItemStockInfo(
   item: any,
   stockInfoRule: any,
 ): string | null {
@@ -194,7 +194,7 @@ function calculateItemStockInfo(
 // FROM: routes (29).ts line 1736 (canonical — superset of routes + importUtils copies)
 // ============================================================
 
-async function getStockInfoRule(
+export async function getStockInfoRule(
   dataSource: any,
   overrideConfig?: any,
 ): Promise<any> {
@@ -265,7 +265,7 @@ async function getStockInfoRule(
 // FROM: routes (29).ts line 4397 (canonical — superset of all 4+ copies)
 // ============================================================
 
-function getStylePrefix(
+export function getStylePrefix(
   style: string,
   dataSource: any,
   cleaningConfig: any,
@@ -304,7 +304,7 @@ function getStylePrefix(
 // FROM: routes (29).ts line 120
 // ============================================================
 
-function checkSafetyThreshold(
+export function checkSafetyThreshold(
   dataSource: any,
   existingCount: number,
   newCount: number,
@@ -337,7 +337,7 @@ function checkSafetyThreshold(
 // HELPER: Title Case conversion
 // ============================================================
 
-function toTitleCase(str: string): string {
+export function toTitleCase(str: string): string {
   return str
     .toLowerCase()
     .replace(/(?:^|[\s\-\/&])\S/g, (a) => a.toUpperCase());
