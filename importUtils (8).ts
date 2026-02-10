@@ -2153,6 +2153,31 @@ export async function processEmailAttachment(
       items = result.items;
     }
 
+    // Apply data source cleaning rules to parsed items
+    // This handles: Style Find and Replace, removeLetters, removeNumbers,
+    // removeSpecialChars, removeFirstN/LastN, findReplaceRules, removePatterns
+    // These settings are configured per data source and must apply to ALL import paths.
+    if (cleaningConfig && items.length > 0) {
+      const hasAnyCleaning =
+        cleaningConfig.findText ||
+        cleaningConfig.findReplaceRules?.length > 0 ||
+        cleaningConfig.removeLetters ||
+        cleaningConfig.removeNumbers ||
+        cleaningConfig.removeSpecialChars ||
+        cleaningConfig.removeFirstN ||
+        cleaningConfig.removeLastN ||
+        cleaningConfig.removePatterns?.length > 0 ||
+        cleaningConfig.trimWhitespace;
+
+      if (hasAnyCleaning) {
+        console.log(`[Email Import] Applying data source cleaning rules to ${items.length} items`);
+        items = items.map((item: any) => ({
+          ...item,
+          style: applyCleaningToValue(String(item.style || ""), cleaningConfig, "style"),
+        }));
+      }
+    }
+
     // Log parsing results for debugging
     eLog(`[EmailImport] Parser used: ${parserUsed}`);
     eLog(`[EmailImport] Parse result: headers=${JSON.stringify(headers?.slice(0, 15))}`);
@@ -2399,15 +2424,16 @@ export async function processEmailAttachment(
         }
       }
 
-      // DEFAULT SAFETY CHECK: Block if row count drops by more than 90% from last import
-      // This catches completely corrupted files even without explicit tolerance config
+      // DEFAULT SAFETY CHECK: Block if row count drops by more than 50% from last import
+      // This catches corrupted files or parser failures even without explicit tolerance config
       // SKIP for multi-file sources: individual files are always smaller than combined total
       if (
-        lastRowCount > 100 &&
-        actualRowCount < lastRowCount * 0.1 &&
+        lastRowCount > 20 &&
+        actualRowCount < lastRowCount * 0.5 &&
         !isMultiFile
       ) {
-        const errorMessage = `SAFETY BLOCK: File appears corrupted - row count dropped from ${lastRowCount} to ${actualRowCount} (>90% decrease). Import blocked to protect your data.`;
+        const dropPercent = Math.round(((lastRowCount - actualRowCount) / lastRowCount) * 100);
+        const errorMessage = `SAFETY BLOCK: Item count dropped ${dropPercent}% (from ${lastRowCount} to ${actualRowCount}). Import blocked to protect your data.`;
         await logSystemError(
           dataSourceId,
           "row_count_error",
