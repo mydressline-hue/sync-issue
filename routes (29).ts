@@ -496,7 +496,10 @@ export async function processUrlDataSourceImport(
 
     // Import inventory items
     const inventoryItems = items.map((item) => {
-      const prefix = item.style ? getStylePrefix(item.style) : dataSource.name;
+      // If item has a brand (from store_multibrand vendor column), use brand as prefix
+      const prefix = item.brand
+        ? String(item.brand).trim()
+        : item.style ? getStylePrefix(item.style) : dataSource.name;
       const prefixedStyle = item.style ? `${prefix} ${item.style}` : item.style;
       const normalizedColor = item.color ? toTitleCase(item.color) : item.color;
       const prefixedSku =
@@ -2324,6 +2327,7 @@ export async function performCombineImport(
       let style: string;
       let size: string;
       let color: string;
+      let brand: string = "";
       let stockValue: any;
       let costValue: any;
       let priceValue: any;
@@ -2341,6 +2345,7 @@ export async function performCombineImport(
         stockValue = getColValue(row, "stock");
         costValue = getColValue(row, "cost");
         priceValue = getColValue(row, "price");
+        brand = String(getColValue(row, "brand") || "");
         shipDateValue =
           getColValue(row, "shipDate") || getColValue(row, "shipdate");
         futureStockValue =
@@ -2558,7 +2563,10 @@ export async function performCombineImport(
         }
       }
 
-      const prefix = style ? getStylePrefix(style) : dataSource.name;
+      // If item has a brand (from store_multibrand vendor column), use brand as prefix
+      const prefix = brand
+        ? brand.trim()
+        : style ? getStylePrefix(style) : dataSource.name;
       const prefixedStyle = style ? `${prefix} ${style}` : style;
 
       // Rebuild SKU from prefixed style + color + size (matching manual upload handler)
@@ -4451,9 +4459,12 @@ export async function registerRoutes(
 
         // Import inventory items - prefix style AND sku with custom prefix or data source name
         const inventoryItems = dedupedUploadItems.map((item: any) => {
-          const prefix = item.style
-            ? getStylePrefix(item.style)
-            : dataSource.name;
+          // If item has a brand (from store_multibrand vendor column), use brand as prefix
+          const prefix = item.brand
+            ? String(item.brand).trim()
+            : item.style
+              ? getStylePrefix(item.style)
+              : dataSource.name;
           const prefixedStyle = item.style
             ? `${prefix} ${item.style}`
             : item.style;
@@ -5295,9 +5306,12 @@ export async function registerRoutes(
 
       // Import inventory items - prefix style AND sku with custom prefix or data source name
       const inventoryItems = filteredItems.map((item: any) => {
-        const prefix = item.style
-          ? getStylePrefix(item.style)
-          : dataSource.name;
+        // If item has a brand (from store_multibrand vendor column), use brand as prefix
+        const prefix = item.brand
+          ? String(item.brand).trim()
+          : item.style
+            ? getStylePrefix(item.style)
+            : dataSource.name;
         const prefixedStyle = item.style
           ? `${prefix} ${item.style}`
           : item.style;
@@ -5991,9 +6005,12 @@ export async function registerRoutes(
           cleaningConfig,
           "style",
         );
-        const prefix = cleanedStyle
-          ? getStylePrefix(cleanedStyle)
-          : dataSource.name;
+        // If item has a brand (from store_multibrand vendor column), use brand as prefix
+        const prefix = item.brand
+          ? String(item.brand).trim()
+          : cleanedStyle
+            ? getStylePrefix(cleanedStyle)
+            : dataSource.name;
 
         return {
           dataSourceId,
