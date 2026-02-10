@@ -47,7 +47,7 @@ import {
 } from "./shopify";
 import { triggerShopifySyncAfterImport } from "./scheduler";
 import { registerVendorImportRoutes } from "./vendorImportRoutes";
-import aiImportRoutes from "./aiImportRoutes";
+import aiImportRoutes, { autoDetectPivotFormat, parseIntelligentPivotFormat, UniversalParserConfig } from "./aiImportRoutes";
 import {
   setupAuth,
   isAuthenticated,
@@ -354,8 +354,8 @@ export async function processUrlDataSourceImport(
       }
     }
 
-    // Parse the Excel file - use format-specific parsers
-    const pivotConfig = (dataSource as any).pivotConfig;
+    // Parse the Excel file - use shared parsers from aiImportRoutes
+    // This ensures URL import uses the EXACT SAME parsing as AI import, email, and manual upload
     const columnMapping = (dataSource.columnMapping as any) || {};
     const cleaningConfig = (dataSource.cleaningConfig as any) || {};
 
@@ -363,197 +363,71 @@ export async function processUrlDataSourceImport(
     let rows: any[][];
     let items: any[];
 
-    // Use format-specific parsers based on detected or configured format
-    // NOTE: parseExcelToInventory already handles CSV detection using isCSVBuffer/parseCSVAsText
-    if (pivotConfig?.format === "sherri_hill") {
-      console.log(
-        `[URL Import] Using Sherri Hill specific parser for ${dataSource.name}`,
-      );
-      const result = parseSherriHillFormat(buffer, cleaningConfig);
-      if (result) {
-        headers = result.headers;
-        rows = result.rows;
-        items = result.items;
-      } else {
-        console.log(
-          `[URL Import] Sherri Hill parser returned null, falling back to generic`,
-        );
-        const fallback = parseExcelToInventory(
-          buffer,
-          columnMapping,
-          cleaningConfig,
-        );
-        headers = fallback.headers;
-        rows = fallback.rows;
-        items = fallback.items;
-      }
-    } else if (pivotConfig?.format === "jovani") {
-      console.log(
-        `[URL Import] Using Jovani specific parser for ${dataSource.name}`,
-      );
-      const jovaniConfig = {
-        ...cleaningConfig,
-        pivotedFormat: { vendor: "jovani" },
+    // Detect format using shared detector
+    const urlWorkbook = XLSX.read(buffer, { type: "buffer" });
+    const urlSheet = urlWorkbook.Sheets[urlWorkbook.SheetNames[0]];
+    const urlRawData = XLSX.utils.sheet_to_json(urlSheet, {
+      header: 1,
+      defval: "",
+      raw: false,
+    }) as any[][];
+
+    const urlDetectedFormat = urlRawData.length > 0
+      ? autoDetectPivotFormat(urlRawData, dataSource.name, filename)
+      : null;
+
+    if (urlDetectedFormat) {
+      console.log(`[URL Import] Shared detector found format: "${urlDetectedFormat}"`);
+      const universalConfig: UniversalParserConfig = {
+        skipRows: (dataSource as any).pivotConfig?.skipRows,
+        discontinuedConfig: (dataSource as any).discontinuedConfig,
+        futureDateConfig: (dataSource as any).futureStockConfig,
+        stockConfig: (dataSource as any).stockValueConfig,
+        columnMapping: (dataSource as any).columnMapping,
       };
-      const result = parseJovaniFormat(buffer, jovaniConfig);
-      if (result) {
-        headers = result.headers;
-        rows = result.rows;
-        items = result.items;
-      } else {
-        console.log(
-          `[URL Import] Jovani parser returned null, falling back to generic`,
-        );
-        const fallback = parseExcelToInventory(
-          buffer,
-          columnMapping,
-          cleaningConfig,
-        );
-        headers = fallback.headers;
-        rows = fallback.rows;
-        items = fallback.items;
+      const pivotResult = parseIntelligentPivotFormat(
+        buffer,
+        urlDetectedFormat,
+        universalConfig,
+        dataSource.name,
+        filename,
+      );
+      headers = pivotResult.headers;
+      rows = pivotResult.rows;
+      items = pivotResult.items;
+
+      // Apply data source cleaning rules
+      if (cleaningConfig && items.length > 0) {
+        const hasAnyCleaning =
+          cleaningConfig.findText ||
+          cleaningConfig.findReplaceRules?.length > 0 ||
+          cleaningConfig.removeLetters ||
+          cleaningConfig.removeNumbers ||
+          cleaningConfig.removeSpecialChars ||
+          cleaningConfig.removeFirstN ||
+          cleaningConfig.removeLastN ||
+          cleaningConfig.removePatterns?.length > 0 ||
+          cleaningConfig.trimWhitespace;
+        if (hasAnyCleaning) {
+          console.log(`[URL Import] Applying data source cleaning rules to ${items.length} items`);
+          items = items.map((item: any) => ({
+            ...item,
+            style: applyCleaningToValue(String(item.style || ""), cleaningConfig, "style"),
+          }));
+        }
       }
-    } else if (pivotConfig?.format === "tarik_ediz") {
-      console.log(
-        `[URL Import] Using Tarik Ediz specific parser for ${dataSource.name}`,
-      );
-      const result = parseTarikEdizFormat(buffer);
-      if (result) {
-        result.items = result.items.map((item: any) => ({
-          ...item,
-          style: applyCleaningToValue(
-            String(item.style || ""),
-            cleaningConfig,
-            "style",
-          ),
-        }));
-        headers = result.headers;
-        rows = result.rows;
-        items = result.items;
-      } else {
-        const fallback = parseExcelToInventory(
-          buffer,
-          columnMapping,
-          cleaningConfig,
-        );
-        headers = fallback.headers;
-        rows = fallback.rows;
-        items = fallback.items;
-      }
-    } else if (pivotConfig?.format === "feriani_gia") {
-      console.log(
-        `[URL Import] Using Feriani/GIA specific parser for ${dataSource.name}`,
-      );
-      const result = parseFerianiGiaFormat(buffer, cleaningConfig);
-      if (result) {
-        headers = result.headers;
-        rows = result.rows;
-        items = result.items;
-      } else {
-        console.log(
-          `[URL Import] Feriani/GIA parser returned null, falling back to generic`,
-        );
-        const fallback = parseExcelToInventory(
-          buffer,
-          columnMapping,
-          cleaningConfig,
-        );
-        headers = fallback.headers;
-        rows = fallback.rows;
-        items = fallback.items;
-      }
-    } else if (pivotConfig?.format === "generic_pivot") {
-      console.log(
-        `[URL Import] Using GENERIC PIVOT parser for ${dataSource.name}`,
-      );
-      const result = parseGenericPivotFormat(
-        buffer,
-        cleaningConfig,
-        dataSource.name,
-        (dataSource as any).discontinuedConfig,
-        (dataSource as any).stockValueConfig,
-        (dataSource as any).sizeLimitConfig,
-        (dataSource as any).stockInfoConfig?.dateOffsetDays ?? 0,
-      );
-      headers = result.headers;
-      rows = result.rows;
-      items = result.items;
-      if (result.sizeFiltered && result.sizeFiltered > 0) {
-        console.log(
-          `[URL Import] Size limits filtered ${result.sizeFiltered} items during parsing`,
-        );
-      }
-    } else if (pivotConfig?.format === "ots_format") {
-      console.log(
-        `[URL Import] Using OTS FORMAT parser for ${dataSource.name}`,
-      );
-      const result = parseOTSFormat(
-        buffer,
-        cleaningConfig,
-        dataSource.name,
-        (dataSource as any).stockValueConfig,
-      );
-      headers = result.headers;
-      rows = result.rows;
-      items = result.items;
-      console.log(
-        `[URL Import] OTS format parse complete: ${items.length} items extracted`,
-      );
-    } else if (pivotConfig?.format === "grn_invoice") {
-      console.log(
-        `[URL Import] Using GRN-INVOICE parser for ${dataSource.name}`,
-      );
-      const result = parseGRNInvoiceFormat(
-        buffer,
-        cleaningConfig,
-        dataSource.name,
-        (dataSource as any).stockValueConfig,
-      );
-      headers = result.headers;
-      rows = result.rows;
-      items = result.items;
-      console.log(
-        `[URL Import] GRN-INVOICE parse complete: ${items.length} items extracted`,
-      );
-    } else if (pivotConfig?.format === "pr_date_headers") {
-      console.log(
-        `[URL Import] Using PR DATE HEADERS parser for ${dataSource.name}`,
-      );
-      const result = parsePRDateHeaderFormat(
-        buffer,
-        cleaningConfig,
-        dataSource.name,
-        (dataSource as any).stockValueConfig,
-      );
-      headers = result.headers;
-      rows = result.rows;
-      items = result.items;
-      console.log(
-        `[URL Import] PR date headers parse complete: ${items.length} items extracted`,
-      );
-    } else if (pivotConfig?.format === "store_multibrand") {
-      console.log(
-        `[URL Import] Using STORE MULTIBRAND parser for ${dataSource.name}`,
-      );
-      const result = parseStoreMultibrandFormat(
-        buffer,
-        cleaningConfig,
-        dataSource.name,
-        (dataSource as any).stockValueConfig,
-      );
-      headers = result.headers;
-      rows = result.rows;
-      items = result.items;
-      console.log(
-        `[URL Import] Store multibrand parse complete: ${items.length} items extracted`,
-      );
-    } else if (pivotConfig?.enabled) {
-      console.log(
-        `[URL Import] Using generic pivoted table parser for ${dataSource.name}`,
-      );
+
+      // Save detected format for future imports
+      await storage.updateDataSource(dataSourceId, {
+        formatType: urlDetectedFormat,
+        pivotConfig: { enabled: true, format: urlDetectedFormat },
+      });
+      console.log(`[URL Import] Shared parser extracted ${items.length} items`);
+    } else if ((dataSource as any).pivotConfig?.enabled) {
+      console.log(`[URL Import] Using legacy pivoted table parser for ${dataSource.name}`);
       const result = parsePivotedExcelToInventory(
         buffer,
-        pivotConfig,
+        (dataSource as any).pivotConfig,
         cleaningConfig,
         dataSource.name,
       );
@@ -4078,173 +3952,32 @@ export async function registerRoutes(
           }
         }
 
-        // Parse the Excel file - use pivoted parser if pivotConfig is enabled
-        let pivotConfig = (dataSource as any).pivotConfig;
+        // Parse the Excel file - use shared parsers from aiImportRoutes
+        // This ensures manual upload uses the EXACT SAME parsing as AI import and email import
         console.log(`[Upload] Processing file for ${dataSource.name}`);
+        let pivotConfig = (dataSource as any).pivotConfig;
         console.log(`[Upload] pivotConfig:`, JSON.stringify(pivotConfig));
-        console.log(`[Upload] pivotConfig?.enabled: ${pivotConfig?.enabled}`);
 
-        // ALWAYS detect format from file content - don't rely on stored config
-        // The stored config might be wrong or missing the format field
+        // ALWAYS detect format from file content using the shared detector
         const workbook = XLSX.read(file.buffer, { type: "buffer" });
         const sheet = workbook.Sheets[workbook.SheetNames[0]];
         const rawData = XLSX.utils.sheet_to_json(sheet, {
           header: 1,
           defval: "",
-          raw: false, // CRITICAL FIX: Match Email import raw: false for consistent parsing
+          raw: false,
         }) as any[][];
 
         let detectedFormat: string | null = null;
-
         if (rawData.length > 0) {
-          const headerStr = rawData[0]
-            .map((h: any) => String(h || "").toUpperCase())
-            .join("|");
-          console.log(
-            `[Upload] Header string for detection: ${headerStr.substring(0, 200)}...`,
-          );
-
-          // Detect Sherri Hill format: has "SPECIAL DATE" in headers
-          if (headerStr.includes("SPECIAL DATE")) {
-            console.log(`[Upload] Auto-detected Sherri Hill pivoted format`);
-            detectedFormat = "sherri_hill";
-          }
-          // Detect Jovani format: has "LOCATION" in header AND size columns (00, 0, 2, 4...)
-          else if (
-            headerStr.includes("LOCATION") &&
-            (headerStr.includes("|00|") || headerStr.includes("|0|"))
-          ) {
-            console.log(`[Upload] Auto-detected Jovani pivoted format`);
-            detectedFormat = "jovani";
-          }
-          // Detect Feriani/GIA format: DELIVERY, STYLE, COLOR headers (check BEFORE Tarik Ediz)
-          else if (
-            headerStr.includes("DELIVERY") &&
-            headerStr.includes("STYLE") &&
-            headerStr.includes("COLOR")
-          ) {
-            console.log(`[Upload] Auto-detected Feriani/GIA pivoted format`);
-            detectedFormat = "feriani_gia";
-          }
-          // Detect Tarik Ediz format: has multiple "D" columns
-          else if ((headerStr.match(/\|D\|/g) || []).length >= 3) {
-            console.log(`[Upload] Auto-detected Tarik Ediz pivoted format`);
-            detectedFormat = "tarik_ediz";
-          }
-          // Detect OTS format: has ots1, ots2, ots3, etc. columns
-          else if (
-            (() => {
-              const headersLower = rawData[0].map((h: any) =>
-                String(h || "").toLowerCase(),
-              );
-              const otsColumns = headersLower.filter((h: string) =>
-                /^ots\d+$/.test(h),
-              );
-              return otsColumns.length >= 3;
-            })()
-          ) {
-            console.log(`[Upload] Auto-detected OTS pivoted format`);
-            detectedFormat = "ots_format";
-          }
-          // Detect generic pivot format: has STYLE column + 5+ size columns (00, 0, 2, 4, etc.)
-          else if (
-            headerStr.includes("STYLE") &&
-            (() => {
-              const sizePattern =
-                /\|(000|00|OOO|OO|0|2|4|6|8|10|12|14|16|18|20|22|24|26|28|30)\|/gi;
-              const matches = headerStr.match(sizePattern);
-              return matches && matches.length >= 5;
-            })()
-          ) {
-            console.log(`[Upload] Auto-detected generic pivot format`);
-            detectedFormat = "generic_pivot";
-          }
-          // Detect GRN-INVOICE format: first cell contains "GRN" or "INVOICE", or header has CODE + COLOR + size columns
-          else if (
-            (() => {
-              const firstCellUpper = String(rawData[0]?.[0] || "")
-                .toUpperCase()
-                .trim();
-              if (
-                firstCellUpper.includes("GRN") ||
-                firstCellUpper.includes("INVOICE")
-              )
-                return true;
-              // Also check if header row has CODE + COLOR + numeric size columns
-              if (headerStr.includes("CODE") && headerStr.includes("COLOR")) {
-                const sizePattern =
-                  /\|(000|00|0|02|04|06|08|10|12|14|16|18|20|22|24)\|/gi;
-                const matches = headerStr.match(sizePattern);
-                if (matches && matches.length >= 3) return true;
-              }
-              // Check second row if first row is a title row
-              if (rawData.length > 1) {
-                const row2Str = rawData[1]
-                  .map((h: any) => String(h || "").toUpperCase())
-                  .join("|");
-                if (row2Str.includes("CODE") && row2Str.includes("COLOR")) {
-                  const sizePattern =
-                    /\|(000|00|0|02|04|06|08|10|12|14|16|18|20|22|24)\|/gi;
-                  const matches = row2Str.match(sizePattern);
-                  if (matches && matches.length >= 3) return true;
-                }
-              }
-              return false;
-            })()
-          ) {
-            console.log(`[Upload] Auto-detected GRN-INVOICE pivoted format`);
-            detectedFormat = "grn_invoice";
-          }
-          // Detect PR Date Headers format: has 3+ date columns as headers
-          // Supports both Excel serial numbers (4xxxx) and date strings (M/D/YYYY)
-          else if (
-            (() => {
-              const dateHeaders = rawData[0]
-                .map((h: any) => String(h || "").trim())
-                .filter((h: string) => /^4\d{4}$/.test(h) || /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(h));
-              return dateHeaders.length >= 3;
-            })()
-          ) {
-            console.log(
-              `[Upload] Auto-detected PR date headers pivoted format`,
-            );
-            detectedFormat = "pr_date_headers";
-          }
-          // Detect Store Multibrand format: PRODUCT NAME + STYLE + COLOR + SIZE columns
-          else if (
-            (() => {
-              if (
-                headerStr.includes("STORE") &&
-                headerStr.includes("INVENTORY")
-              )
-                return true;
-              if (
-                headerStr.includes("PRODUCT NAME") &&
-                headerStr.includes("STYLE") &&
-                headerStr.includes("COLOR") &&
-                headerStr.includes("SIZE") &&
-                (headerStr.includes("STOCK") || headerStr.includes("QTY"))
-              )
-                return true;
-              return false;
-            })()
-          ) {
-            console.log(`[Upload] Auto-detected store multibrand format`);
-            detectedFormat = "store_multibrand";
-          }
-
-          // Update pivotConfig with detected format
+          detectedFormat = autoDetectPivotFormat(rawData, dataSource.name, file.originalname);
           if (detectedFormat) {
+            console.log(`[Upload] Shared detector found format: "${detectedFormat}"`);
             pivotConfig = { enabled: true, format: detectedFormat };
-
             // Save the detected format for future imports
             await storage.updateDataSource(dataSourceId, {
               formatType: detectedFormat,
               pivotConfig: { enabled: true, format: detectedFormat },
             });
-            console.log(
-              `[Upload] Saved detected format "${detectedFormat}" to data source`,
-            );
           }
         }
 
@@ -4252,203 +3985,53 @@ export async function registerRoutes(
         let rows: any[][];
         let items: any[];
 
-        // Use format-specific parsers based on detected or configured format
-        if (pivotConfig?.format === "sherri_hill") {
-          console.log(
-            `[Upload] Using Sherri Hill specific parser for ${dataSource.name}`,
-          );
-          const result = parseSherriHillFormat(
-            file.buffer,
-            dataSource.cleaningConfig || {},
-          );
-          if (result) {
-            headers = result.headers;
-            rows = result.rows;
-            items = result.items;
-          } else {
-            // Fallback to generic parser if Sherri Hill parser fails
-            console.log(
-              `[Upload] Sherri Hill parser returned null, falling back to generic`,
-            );
-            const fallback = parseExcelToInventory(
-              file.buffer,
-              dataSource.columnMapping || {},
-              dataSource.cleaningConfig || {},
-            );
-            headers = fallback.headers;
-            rows = fallback.rows;
-            items = fallback.items;
-          }
-        } else if (pivotConfig?.format === "jovani") {
-          console.log(
-            `[Upload] Using Jovani specific parser for ${dataSource.name}`,
-          );
-          // Pass cleaningConfig with pivotedFormat.vendor = "jovani" to trigger Jovani parser
-          const jovaniConfig = {
-            ...dataSource.cleaningConfig,
-            pivotedFormat: { vendor: "jovani" },
+        // Use shared parsers for all detected pivot/format-specific types
+        if (detectedFormat || (pivotConfig?.format && pivotConfig.format !== "generic_legacy")) {
+          const actualFormat = detectedFormat || pivotConfig.format;
+          console.log(`[Upload] Using shared parser for format: "${actualFormat}"`);
+          const universalConfig: UniversalParserConfig = {
+            skipRows: pivotConfig?.skipRows,
+            discontinuedConfig: (dataSource as any).discontinuedConfig,
+            futureDateConfig: (dataSource as any).futureStockConfig,
+            stockConfig: (dataSource as any).stockValueConfig,
+            columnMapping: (dataSource as any).columnMapping,
           };
-          const result = parseJovaniFormat(file.buffer, jovaniConfig);
-          if (result) {
-            headers = result.headers;
-            rows = result.rows;
-            items = result.items;
-          } else {
-            console.log(
-              `[Upload] Jovani parser returned null, falling back to generic`,
-            );
-            const fallback = parseExcelToInventory(
-              file.buffer,
-              dataSource.columnMapping || {},
-              dataSource.cleaningConfig || {},
-            );
-            headers = fallback.headers;
-            rows = fallback.rows;
-            items = fallback.items;
+          const pivotResult = parseIntelligentPivotFormat(
+            file.buffer,
+            actualFormat,
+            universalConfig,
+            dataSource.name,
+            file.originalname,
+          );
+          headers = pivotResult.headers;
+          rows = pivotResult.rows;
+          items = pivotResult.items;
+
+          // Apply data source cleaning rules (Style Find/Replace, etc.)
+          const uploadCleaningConfig = (dataSource.cleaningConfig || {}) as any;
+          if (uploadCleaningConfig && items.length > 0) {
+            const hasAnyCleaning =
+              uploadCleaningConfig.findText ||
+              uploadCleaningConfig.findReplaceRules?.length > 0 ||
+              uploadCleaningConfig.removeLetters ||
+              uploadCleaningConfig.removeNumbers ||
+              uploadCleaningConfig.removeSpecialChars ||
+              uploadCleaningConfig.removeFirstN ||
+              uploadCleaningConfig.removeLastN ||
+              uploadCleaningConfig.removePatterns?.length > 0 ||
+              uploadCleaningConfig.trimWhitespace;
+            if (hasAnyCleaning) {
+              console.log(`[Upload] Applying data source cleaning rules to ${items.length} items`);
+              items = items.map((item: any) => ({
+                ...item,
+                style: applyCleaningToValue(String(item.style || ""), uploadCleaningConfig, "style"),
+              }));
+            }
           }
-        } else if (pivotConfig?.format === "tarik_ediz") {
-          console.log(
-            `[Upload] Using Tarik Ediz specific parser for ${dataSource.name}`,
-          );
-          const result = parseTarikEdizFormat(file.buffer);
-          if (result) {
-            // Apply cleaning to the items
-            result.items = result.items.map((item: any) => ({
-              ...item,
-              style: applyCleaningToValue(
-                String(item.style || ""),
-                dataSource.cleaningConfig || {},
-                "style",
-              ),
-            }));
-            headers = result.headers;
-            rows = result.rows;
-            items = result.items;
-          } else {
-            // Fallback
-            const fallback = parseExcelToInventory(
-              file.buffer,
-              dataSource.columnMapping || {},
-              dataSource.cleaningConfig || {},
-            );
-            headers = fallback.headers;
-            rows = fallback.rows;
-            items = fallback.items;
-          }
-        } else if (pivotConfig?.format === "feriani_gia") {
-          console.log(
-            `[Upload] Using Feriani/GIA specific parser for ${dataSource.name}`,
-          );
-          const result = parseFerianiGiaFormat(
-            file.buffer,
-            dataSource.cleaningConfig || {},
-          );
-          if (result) {
-            headers = result.headers;
-            rows = result.rows;
-            items = result.items;
-          } else {
-            console.log(
-              `[Upload] Feriani/GIA parser returned null, falling back to generic`,
-            );
-            const fallback = parseExcelToInventory(
-              file.buffer,
-              dataSource.columnMapping || {},
-              dataSource.cleaningConfig || {},
-            );
-            headers = fallback.headers;
-            rows = fallback.rows;
-            items = fallback.items;
-          }
-        } else if (pivotConfig?.format === "ots_format") {
-          console.log(
-            `[Upload] Using OTS FORMAT parser for ${dataSource.name}`,
-          );
-          const result = parseOTSFormat(
-            file.buffer,
-            dataSource.cleaningConfig || {},
-            dataSource.name,
-            (dataSource as any).stockValueConfig,
-          );
-          headers = result.headers;
-          rows = result.rows;
-          items = result.items;
-          console.log(
-            `[Upload] OTS format parse complete: ${items.length} items extracted`,
-          );
-        } else if (pivotConfig?.format === "generic_pivot") {
-          console.log(
-            `[Upload] Using GENERIC PIVOT parser for ${dataSource.name}`,
-          );
-          const result = parseGenericPivotFormat(
-            file.buffer,
-            dataSource.cleaningConfig || {},
-            dataSource.name,
-            (dataSource as any).discontinuedConfig,
-            (dataSource as any).stockValueConfig,
-            (dataSource as any).sizeLimitConfig,
-            (dataSource as any).stockInfoConfig?.dateOffsetDays ?? 0,
-          );
-          headers = result.headers;
-          rows = result.rows;
-          items = result.items;
-          if (result.sizeFiltered && result.sizeFiltered > 0) {
-            console.log(
-              `[Upload] Size limits filtered ${result.sizeFiltered} items during parsing`,
-            );
-          }
-        } else if (pivotConfig?.format === "grn_invoice") {
-          console.log(
-            `[Upload] Using GRN-INVOICE parser for ${dataSource.name}`,
-          );
-          const result = parseGRNInvoiceFormat(
-            file.buffer,
-            dataSource.cleaningConfig || {},
-            dataSource.name,
-            (dataSource as any).stockValueConfig,
-          );
-          headers = result.headers;
-          rows = result.rows;
-          items = result.items;
-          console.log(
-            `[Upload] GRN-INVOICE parse complete: ${items.length} items extracted`,
-          );
-        } else if (pivotConfig?.format === "pr_date_headers") {
-          console.log(
-            `[Upload] Using PR DATE HEADERS parser for ${dataSource.name}`,
-          );
-          const result = parsePRDateHeaderFormat(
-            file.buffer,
-            dataSource.cleaningConfig || {},
-            dataSource.name,
-            (dataSource as any).stockValueConfig,
-          );
-          headers = result.headers;
-          rows = result.rows;
-          items = result.items;
-          console.log(
-            `[Upload] PR date headers parse complete: ${items.length} items extracted`,
-          );
-        } else if (pivotConfig?.format === "store_multibrand") {
-          console.log(
-            `[Upload] Using STORE MULTIBRAND parser for ${dataSource.name}`,
-          );
-          const result = parseStoreMultibrandFormat(
-            file.buffer,
-            dataSource.cleaningConfig || {},
-            dataSource.name,
-            (dataSource as any).stockValueConfig,
-          );
-          headers = result.headers;
-          rows = result.rows;
-          items = result.items;
-          console.log(
-            `[Upload] Store multibrand parse complete: ${items.length} items extracted`,
-          );
+
+          console.log(`[Upload] Shared parser extracted ${items.length} items`);
         } else if (pivotConfig?.enabled) {
-          console.log(
-            `[Upload] Using generic pivoted table parser for ${dataSource.name}`,
-          );
+          console.log(`[Upload] Using legacy pivoted table parser for ${dataSource.name}`);
           const result = parsePivotedExcelToInventory(
             file.buffer,
             pivotConfig,
@@ -5286,207 +4869,76 @@ export async function registerRoutes(
         }
       }
 
-      // Parse the Excel file - use pivoted parser if pivotConfig is enabled (matching manual upload)
-      const pivotConfig = (dataSource as any).pivotConfig;
-      const columnMapping = (dataSource.columnMapping as any) || {};
-      const cleaningConfig = (dataSource.cleaningConfig as any) || {};
+      // Parse the Excel file - use shared parsers from aiImportRoutes
+      // This ensures URL fetch uses the EXACT SAME parsing as AI import, email, and manual upload
+      const fetchColumnMapping = (dataSource.columnMapping as any) || {};
+      const fetchCleaningConfig = (dataSource.cleaningConfig as any) || {};
 
       let headers: string[];
       let rows: any[][];
       let items: any[];
 
-      // Use format-specific parsers based on detected or configured format
-      if (pivotConfig?.format === "sherri_hill") {
-        console.log(
-          `[URL Fetch] Using Sherri Hill specific parser for ${dataSource.name}`,
-        );
-        const result = parseSherriHillFormat(buffer, cleaningConfig);
-        if (result) {
-          headers = result.headers;
-          rows = result.rows;
-          items = result.items;
-        } else {
-          // Fallback to generic parser
-          console.log(
-            `[URL Fetch] Sherri Hill parser returned null, falling back to generic`,
-          );
-          const fallback = parseExcelToInventory(
-            buffer,
-            columnMapping,
-            cleaningConfig,
-          );
-          headers = fallback.headers;
-          rows = fallback.rows;
-          items = fallback.items;
-        }
-      } else if (pivotConfig?.format === "jovani") {
-        console.log(
-          `[URL Fetch] Using Jovani specific parser for ${dataSource.name}`,
-        );
-        const jovaniConfig = {
-          ...cleaningConfig,
-          pivotedFormat: { vendor: "jovani" },
+      // Detect format using shared detector
+      const fetchWorkbook = XLSX.read(buffer, { type: "buffer" });
+      const fetchSheet = fetchWorkbook.Sheets[fetchWorkbook.SheetNames[0]];
+      const fetchRawData = XLSX.utils.sheet_to_json(fetchSheet, {
+        header: 1,
+        defval: "",
+        raw: false,
+      }) as any[][];
+
+      const fetchDetectedFormat = fetchRawData.length > 0
+        ? autoDetectPivotFormat(fetchRawData, dataSource.name, urlFilename)
+        : null;
+
+      if (fetchDetectedFormat) {
+        console.log(`[URL Fetch] Shared detector found format: "${fetchDetectedFormat}"`);
+        const universalConfig: UniversalParserConfig = {
+          skipRows: (dataSource as any).pivotConfig?.skipRows,
+          discontinuedConfig: (dataSource as any).discontinuedConfig,
+          futureDateConfig: (dataSource as any).futureStockConfig,
+          stockConfig: (dataSource as any).stockValueConfig,
+          columnMapping: (dataSource as any).columnMapping,
         };
-        const result = parseJovaniFormat(buffer, jovaniConfig);
-        if (result) {
-          headers = result.headers;
-          rows = result.rows;
-          items = result.items;
-        } else {
-          console.log(
-            `[URL Fetch] Jovani parser returned null, falling back to generic`,
-          );
-          const fallback = parseExcelToInventory(
-            buffer,
-            columnMapping,
-            cleaningConfig,
-          );
-          headers = fallback.headers;
-          rows = fallback.rows;
-          items = fallback.items;
+        const pivotResult = parseIntelligentPivotFormat(
+          buffer,
+          fetchDetectedFormat,
+          universalConfig,
+          dataSource.name,
+          urlFilename,
+        );
+        headers = pivotResult.headers;
+        rows = pivotResult.rows;
+        items = pivotResult.items;
+
+        // Apply data source cleaning rules
+        if (fetchCleaningConfig && items.length > 0) {
+          const hasAnyCleaning =
+            fetchCleaningConfig.findText ||
+            fetchCleaningConfig.findReplaceRules?.length > 0 ||
+            fetchCleaningConfig.removeLetters ||
+            fetchCleaningConfig.removeNumbers ||
+            fetchCleaningConfig.removeSpecialChars ||
+            fetchCleaningConfig.removeFirstN ||
+            fetchCleaningConfig.removeLastN ||
+            fetchCleaningConfig.removePatterns?.length > 0 ||
+            fetchCleaningConfig.trimWhitespace;
+          if (hasAnyCleaning) {
+            console.log(`[URL Fetch] Applying data source cleaning rules to ${items.length} items`);
+            items = items.map((item: any) => ({
+              ...item,
+              style: applyCleaningToValue(String(item.style || ""), fetchCleaningConfig, "style"),
+            }));
+          }
         }
-      } else if (pivotConfig?.format === "tarik_ediz") {
-        console.log(
-          `[URL Fetch] Using Tarik Ediz specific parser for ${dataSource.name}`,
-        );
-        const result = parseTarikEdizFormat(buffer);
-        if (result) {
-          result.items = result.items.map((item: any) => ({
-            ...item,
-            style: applyCleaningToValue(
-              String(item.style || ""),
-              cleaningConfig,
-              "style",
-            ),
-          }));
-          headers = result.headers;
-          rows = result.rows;
-          items = result.items;
-        } else {
-          const fallback = parseExcelToInventory(
-            buffer,
-            columnMapping,
-            cleaningConfig,
-          );
-          headers = fallback.headers;
-          rows = fallback.rows;
-          items = fallback.items;
-        }
-      } else if (pivotConfig?.format === "feriani_gia") {
-        console.log(
-          `[URL Fetch] Using Feriani/GIA specific parser for ${dataSource.name}`,
-        );
-        const result = parseFerianiGiaFormat(buffer, cleaningConfig);
-        if (result) {
-          headers = result.headers;
-          rows = result.rows;
-          items = result.items;
-        } else {
-          console.log(
-            `[URL Fetch] Feriani/GIA parser returned null, falling back to generic`,
-          );
-          const fallback = parseExcelToInventory(
-            buffer,
-            columnMapping,
-            cleaningConfig,
-          );
-          headers = fallback.headers;
-          rows = fallback.rows;
-          items = fallback.items;
-        }
-      } else if (pivotConfig?.format === "generic_pivot") {
-        console.log(
-          `[URL Fetch] Using GENERIC PIVOT parser for ${dataSource.name}`,
-        );
-        const result = parseGenericPivotFormat(
-          buffer,
-          cleaningConfig,
-          dataSource.name,
-          (dataSource as any).discontinuedConfig,
-          (dataSource as any).stockValueConfig,
-          (dataSource as any).sizeLimitConfig,
-          (dataSource as any).stockInfoConfig?.dateOffsetDays ?? 0,
-        );
-        headers = result.headers;
-        rows = result.rows;
-        items = result.items;
-        if (result.sizeFiltered && result.sizeFiltered > 0) {
-          console.log(
-            `[URL Fetch] Size limits filtered ${result.sizeFiltered} items during parsing`,
-          );
-        }
-      } else if (pivotConfig?.format === "ots_format") {
-        console.log(
-          `[URL Fetch] Using OTS FORMAT parser for ${dataSource.name}`,
-        );
-        const result = parseOTSFormat(
-          buffer,
-          cleaningConfig,
-          dataSource.name,
-          (dataSource as any).stockValueConfig,
-        );
-        headers = result.headers;
-        rows = result.rows;
-        items = result.items;
-        console.log(
-          `[URL Fetch] OTS format parse complete: ${items.length} items extracted`,
-        );
-      } else if (pivotConfig?.format === "grn_invoice") {
-        console.log(
-          `[URL Fetch] Using GRN-INVOICE parser for ${dataSource.name}`,
-        );
-        const result = parseGRNInvoiceFormat(
-          buffer,
-          cleaningConfig,
-          dataSource.name,
-          (dataSource as any).stockValueConfig,
-        );
-        headers = result.headers;
-        rows = result.rows;
-        items = result.items;
-        console.log(
-          `[URL Fetch] GRN-INVOICE parse complete: ${items.length} items extracted`,
-        );
-      } else if (pivotConfig?.format === "pr_date_headers") {
-        console.log(
-          `[URL Fetch] Using PR DATE HEADERS parser for ${dataSource.name}`,
-        );
-        const result = parsePRDateHeaderFormat(
-          buffer,
-          cleaningConfig,
-          dataSource.name,
-          (dataSource as any).stockValueConfig,
-        );
-        headers = result.headers;
-        rows = result.rows;
-        items = result.items;
-        console.log(
-          `[URL Fetch] PR date headers parse complete: ${items.length} items extracted`,
-        );
-      } else if (pivotConfig?.format === "store_multibrand") {
-        console.log(
-          `[URL Fetch] Using STORE MULTIBRAND parser for ${dataSource.name}`,
-        );
-        const result = parseStoreMultibrandFormat(
-          buffer,
-          cleaningConfig,
-          dataSource.name,
-          (dataSource as any).stockValueConfig,
-        );
-        headers = result.headers;
-        rows = result.rows;
-        items = result.items;
-        console.log(
-          `[URL Fetch] Store multibrand parse complete: ${items.length} items extracted`,
-        );
-      } else if (pivotConfig?.enabled) {
-        console.log(
-          `[URL Fetch] Using generic pivoted table parser for ${dataSource.name}`,
-        );
+
+        console.log(`[URL Fetch] Shared parser extracted ${items.length} items`);
+      } else if ((dataSource as any).pivotConfig?.enabled) {
+        console.log(`[URL Fetch] Using legacy pivoted table parser for ${dataSource.name}`);
         const result = parsePivotedExcelToInventory(
           buffer,
-          pivotConfig,
-          cleaningConfig,
+          (dataSource as any).pivotConfig,
+          fetchCleaningConfig,
           dataSource.name,
         );
         headers = result.headers;
@@ -5495,8 +4947,8 @@ export async function registerRoutes(
       } else {
         const result = parseExcelToInventory(
           buffer,
-          columnMapping,
-          cleaningConfig,
+          fetchColumnMapping,
+          fetchCleaningConfig,
         );
         headers = result.headers;
         rows = result.rows;
