@@ -682,6 +682,21 @@ export async function processUrlDataSourceImport(
 
     if (itemsAfterExpansion.length > 0) {
       if (updateStrategy === "full_sync") {
+        // SAFETY NET: Block if item count dropped by more than 50%
+        const existingCount = await storage.getInventoryItemCountByDataSource(dataSourceId);
+        if (existingCount > 20 && itemsAfterExpansion.length > 0) {
+          const dropPercent = ((existingCount - itemsAfterExpansion.length) / existingCount) * 100;
+          if (dropPercent > 50) {
+            console.error(
+              `[URL Import] SAFETY BLOCK: Item count dropped ${dropPercent.toFixed(0)}% (${existingCount} → ${itemsAfterExpansion.length}) for "${dataSource.name}". Import blocked.`,
+            );
+            return {
+              success: false,
+              error: `SAFETY NET: Item count dropped ${dropPercent.toFixed(0)}% (from ${existingCount} to ${itemsAfterExpansion.length}). Import blocked to prevent data loss.`,
+              safetyBlock: true,
+            };
+          }
+        }
         console.log(
           `[URL Import Full Sync] ${dataSource.name}: Starting atomic replace with ${itemsAfterExpansion.length} items`,
         );
@@ -2888,6 +2903,21 @@ export async function performCombineImport(
 
   if (itemsToImport.length > 0) {
     if (updateStrategy === "full_sync") {
+      // SAFETY NET: Block if item count dropped by more than 50%
+      const existingCount = await storage.getInventoryItemCountByDataSource(dataSourceId);
+      if (existingCount > 20 && itemsToImport.length > 0) {
+        const dropPercent = ((existingCount - itemsToImport.length) / existingCount) * 100;
+        if (dropPercent > 50) {
+          console.error(
+            `[Combine] SAFETY BLOCK: Item count dropped ${dropPercent.toFixed(0)}% (${existingCount} → ${itemsToImport.length}) for "${dataSource.name}". Import blocked.`,
+          );
+          return {
+            success: false,
+            error: `SAFETY NET: Item count dropped ${dropPercent.toFixed(0)}% (from ${existingCount} to ${itemsToImport.length}). Import blocked to prevent data loss.`,
+            safetyBlock: true,
+          };
+        }
+      }
       console.log(
         `[Combine Full Sync] ${dataSource.name}: Starting atomic replace with ${itemsToImport.length} items`,
       );
@@ -4697,6 +4727,23 @@ export async function registerRoutes(
 
         if (itemsToImport.length > 0) {
           if (updateStrategy === "full_sync") {
+            // SAFETY NET: Block if item count dropped by more than 50%
+            const existingCount = await storage.getInventoryItemCountByDataSource(dataSourceId);
+            if (existingCount > 20 && itemsToImport.length > 0) {
+              const dropPercent = ((existingCount - itemsToImport.length) / existingCount) * 100;
+              if (dropPercent > 50) {
+                console.error(
+                  `[Import] SAFETY BLOCK: Item count dropped ${dropPercent.toFixed(0)}% (${existingCount} → ${itemsToImport.length}) for "${dataSource.name}". Import blocked.`,
+                );
+                return res.status(400).json({
+                  error: `SAFETY NET: Item count dropped ${dropPercent.toFixed(0)}% (from ${existingCount} to ${itemsToImport.length}). Import blocked to prevent data loss.`,
+                  safetyBlock: true,
+                  existingCount,
+                  newCount: itemsToImport.length,
+                  dropPercent: Math.round(dropPercent),
+                });
+              }
+            }
             // Full Sync: Atomic delete + insert to guarantee no stale items remain
             console.log(
               `[Import Full Sync] ${dataSource.name}: Starting atomic replace with ${itemsToImport.length} items`,
@@ -5529,6 +5576,23 @@ export async function registerRoutes(
 
       if (itemsToImport.length > 0) {
         if (updateStrategy === "full_sync") {
+          // SAFETY NET: Block if item count dropped by more than 50%
+          const existingCount = await storage.getInventoryItemCountByDataSource(dataSourceId);
+          if (existingCount > 20 && itemsToImport.length > 0) {
+            const dropPercent = ((existingCount - itemsToImport.length) / existingCount) * 100;
+            if (dropPercent > 50) {
+              console.error(
+                `[URL Fetch] SAFETY BLOCK: Item count dropped ${dropPercent.toFixed(0)}% (${existingCount} → ${itemsToImport.length}) for "${dataSource.name}". Import blocked.`,
+              );
+              return res.status(400).json({
+                error: `SAFETY NET: Item count dropped ${dropPercent.toFixed(0)}% (from ${existingCount} to ${itemsToImport.length}). Import blocked to prevent data loss.`,
+                safetyBlock: true,
+                existingCount,
+                newCount: itemsToImport.length,
+                dropPercent: Math.round(dropPercent),
+              });
+            }
+          }
           console.log(
             `[URL Import Full Sync] ${dataSource.name}: Starting atomic replace with ${itemsToImport.length} items`,
           );
@@ -6686,21 +6750,34 @@ export async function registerRoutes(
           .json({ error: "dataSourceId and items array are required" });
       }
 
-      // SAFETY NET: Block empty import from deleting all data
-      if (items.length === 0) {
-        const existingCount =
-          await storage.getInventoryItemCountByDataSource(dataSourceId);
-        if (existingCount > 0) {
+      // SAFETY NET: Block empty import or massive drop from deleting all data
+      const existingCount = await storage.getInventoryItemCountByDataSource(dataSourceId);
+      if (items.length === 0 && existingCount > 0) {
+        console.error(
+          `[Manual Import] SAFETY BLOCK: Import has 0 items but data source has ${existingCount} existing items. ` +
+            `Blocking import to prevent data loss.`,
+        );
+        return res.status(400).json({
+          error: "Import blocked - no items provided",
+          safetyBlock: true,
+          message:
+            `SAFETY NET: Import has 0 items but would delete ${existingCount} existing items. ` +
+            `This appears to be a corrupted or empty file. Import blocked to protect your data.`,
+        });
+      }
+      // SAFETY NET: Block if item count dropped by more than 50%
+      if (existingCount > 20 && items.length > 0) {
+        const dropPercent = ((existingCount - items.length) / existingCount) * 100;
+        if (dropPercent > 50) {
           console.error(
-            `[Manual Import] SAFETY BLOCK: Import has 0 items but data source has ${existingCount} existing items. ` +
-              `Blocking import to prevent data loss.`,
+            `[Manual Import] SAFETY BLOCK: Item count dropped ${dropPercent.toFixed(0)}% (${existingCount} → ${items.length}). Import blocked.`,
           );
           return res.status(400).json({
-            error: "Import blocked - no items provided",
+            error: `SAFETY NET: Item count dropped ${dropPercent.toFixed(0)}% (from ${existingCount} to ${items.length}). Import blocked to prevent data loss.`,
             safetyBlock: true,
-            message:
-              `SAFETY NET: Import has 0 items but would delete ${existingCount} existing items. ` +
-              `This appears to be a corrupted or empty file. Import blocked to protect your data.`,
+            existingCount,
+            newCount: items.length,
+            dropPercent: Math.round(dropPercent),
           });
         }
       }
