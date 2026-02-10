@@ -48,6 +48,7 @@ import {
   applyCleaningToValue,
 } from "./importUtils";
 import { executeImport } from "./importEngine";
+import { analyzeFileWithAI, parseGroupedPivotData, toEnhancedConfig } from "./universalParser";
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -1614,7 +1615,52 @@ router.post("/analyze", upload.any(), async (req: Request, res: Response) => {
       });
     }
 
-    // Try AI detection, but fall back to basic detection if it fails
+    // Try Universal Parser AI analysis first (handles row, pivot, AND grouped pivot)
+    let universalResult = null;
+    try {
+      universalResult = await analyzeFileWithAI(rawData, primaryFile.originalname);
+    } catch (uErr: any) {
+      console.error("[AIImport] Universal parser analysis failed:", uErr.message);
+    }
+
+    if (universalResult && universalResult.confidence >= 70) {
+      console.log(`[AIImport] Universal parser detected: ${universalResult.formatType} (confidence: ${universalResult.confidence}%)`);
+      const uHeaders = rawData[0] || [];
+
+      // Build response in the format the UI expects
+      const uMapping: any = universalResult.columnMapping || {};
+
+      return res.json({
+        detection: {
+          success: true,
+          formatType: universalResult.formatType === "pivot" ? "pivoted" : universalResult.formatType,
+          formatConfidence: universalResult.confidence,
+          confidence: universalResult.confidence,
+          columnMapping: uMapping,
+          suggestedColumnMapping: uMapping,
+          pivotConfig: universalResult.pivotConfig
+            ? { enabled: true, ...universalResult.pivotConfig }
+            : universalResult.formatType === "pivot_grouped"
+              ? { enabled: true, format: "pivot_grouped" }
+              : null,
+          groupedPivotConfig: universalResult.groupedPivotConfig || null,
+          notes: universalResult.notes || [],
+          warnings: [],
+          columns: uHeaders.map((h: any, i: number) => ({
+            headerName: String(h || ""),
+            columnIndex: i,
+          })),
+          detectedPatterns: {
+            hasDiscontinuedIndicators: !!uMapping.status,
+            hasDateColumns: !!uMapping.shipDate,
+            hasTextStockValues: false,
+            hasPriceColumn: !!uMapping.price || !!universalResult.pivotConfig?.priceColumn || universalResult.groupedPivotConfig?.priceColumn !== undefined,
+          },
+        },
+      });
+    }
+
+    // Fall back to AI format detection (column-level analysis)
     let analysisResult;
     try {
       analysisResult = await detectFileFormat(
@@ -1799,7 +1845,23 @@ router.post(
 
       let parseResult: any;
 
-      if (isPivotFormat) {
+      if (config.formatType === "pivot_grouped" && (configOverride?.groupedPivotConfig || (dataSource as any)?.groupedPivotConfig)) {
+        // Grouped pivot format — use universal parser extractor
+        const gpConfig = configOverride?.groupedPivotConfig || (dataSource as any).groupedPivotConfig;
+        console.log(`[AIImport Preview] Using grouped pivot parser`);
+        const groupedResult = parseGroupedPivotData(rawData, gpConfig);
+        parseResult = {
+          success: true,
+          items: groupedResult.items,
+          stats: {
+            totalRows: rawData.length,
+            validItems: groupedResult.items.length,
+            discontinuedItems: 0,
+            futureStockItems: 0,
+          },
+          warnings: [],
+        };
+      } else if (isPivotFormat) {
         const actualFormat =
           detectedPivotFormat || config.formatType || "pivot_interleaved";
         const universalConfig: UniversalParserConfig = {
@@ -2013,7 +2075,23 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
 
     let parseResult: any;
 
-    if (isPivotFormat) {
+    if (config.formatType === "pivot_grouped" && (overrideConfig?.groupedPivotConfig || (dataSource as any).groupedPivotConfig)) {
+      // Grouped pivot format — use universal parser extractor
+      const gpConfig = overrideConfig?.groupedPivotConfig || (dataSource as any).groupedPivotConfig;
+      console.log(`[AIImport Execute] Using grouped pivot parser`);
+      const groupedResult = parseGroupedPivotData(rawData, gpConfig);
+      parseResult = {
+        success: true,
+        items: groupedResult.items,
+        stats: {
+          totalRows: rawData.length,
+          totalItems: groupedResult.items.length,
+          discontinuedItems: 0,
+          futureStockItems: 0,
+        },
+        warnings: [],
+      };
+    } else if (isPivotFormat) {
       const actualFormat =
         detectedPivotFormat || config.formatType || "pivot_interleaved";
       const universalConfig: UniversalParserConfig = {
@@ -3091,6 +3169,7 @@ router.post(
         priceExpansionConfig,
         priceBasedExpansionConfig, // Frontend might send either name
         sizeLimitConfig, // BUG FIX: Was missing - size limits weren't being saved
+        groupedPivotConfig, // Universal parser grouped pivot config
       } = req.body;
 
       if (!dataSourceId)
@@ -3135,6 +3214,9 @@ router.post(
       // BUG FIX: Save sizeLimitConfig
       if (sizeLimitConfig !== undefined)
         updateData.sizeLimitConfig = sizeLimitConfig;
+      // Save grouped pivot config from universal parser
+      if (groupedPivotConfig !== undefined)
+        updateData.groupedPivotConfig = groupedPivotConfig;
 
       console.log(
         `[AIImport] save-config: stockInfoConfig=${stockInfoConfig ? "YES" : "NO"}, priceExpansionConfig=${priceExpConfig ? "YES" : "NO"}, complexStockConfig=${complexStockConfig ? "YES" : "NO"}, sizeLimitConfig=${sizeLimitConfig ? "YES" : "NO"}`,

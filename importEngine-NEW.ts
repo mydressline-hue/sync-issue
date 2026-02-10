@@ -38,6 +38,7 @@ import {
   registerSaleFileStyles,
   parsePivotedExcelToInventory,
 } from "./importUtils";
+import { parseGroupedPivotData } from "./universalParser";
 
 // ============================================================
 // TYPE DEFINITIONS
@@ -456,7 +457,15 @@ export async function executeImport(
       (dsConfig.pivotConfig?.format && dsConfig.pivotConfig.format !== "generic_legacy");
 
     // PHASE 1, Step 3: Parse using appropriate parser
-    if (isPivotFormat || detectedPivotFormat) {
+    if (dsConfig.formatType === "pivot_grouped" && (dataSource as any).groupedPivotConfig?.enabled) {
+      // Grouped pivot format (AI-detected) — use universal parser extractor
+      const gpConfig = (dataSource as any).groupedPivotConfig;
+      console.log(`${logPrefix} Using grouped pivot parser (universal)`);
+      const groupedResult = parseGroupedPivotData(rawData, gpConfig);
+      headers = groupedResult.headers;
+      rows = groupedResult.rows;
+      items = groupedResult.items;
+    } else if (isPivotFormat || detectedPivotFormat) {
       const actualFormat =
         detectedPivotFormat || dsConfig.pivotConfig?.format || dsConfig.formatType || "pivot_interleaved";
       console.log(`${logPrefix} Using shared parser for format: "${actualFormat}"`);
