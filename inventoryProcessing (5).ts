@@ -2013,13 +2013,19 @@ export async function applyImportRules(
       const futureStock = parseFloat(String(item.futureStock || 0)) || 0;
       const hasFutureDate =
         item.futureDate && String(item.futureDate).trim() !== "";
+      // FIX: In dateOnlyMode, the date may be in shipDate (from column mapping)
+      // instead of futureDate (e.g. combine import, standard parser).
+      // Check both fields so zero-stock items with any date are preserved.
+      const hasShipDate =
+        item.shipDate && String(item.shipDate).trim() !== "";
+      const hasAnyDate = hasFutureDate || hasShipDate;
 
       // Determine if this item should be preserved based on mode:
-      // - Date Only Mode: preserve if current stock is 0 and has a future date (ignore futureStock quantity)
+      // - Date Only Mode: preserve if current stock is 0 and has ANY date (futureDate or shipDate)
       // - Normal Mode: preserve if current stock is 0 and has sufficient future stock quantity
       const shouldPreserve =
         currentStock <= 0 &&
-        ((dateOnlyMode && hasFutureDate) ||
+        ((dateOnlyMode && hasAnyDate) ||
           (!dateOnlyMode && futureStock >= minFutureStock));
 
       if (shouldPreserve) {
@@ -2034,10 +2040,17 @@ export async function applyImportRules(
         };
 
         // Use future date as ship date if configured
+        // Only overwrite shipDate when futureDate actually exists;
+        // if the date is already in shipDate (combine/standard parser), leave it as-is
         if (futureConfig.useFutureDateAsShipDate && hasFutureDate) {
           updatedItem.shipDate = item.futureDate;
           console.log(
             `[FutureStock] Item ${item.sku || item.style}: Using future date ${item.futureDate} as ship date`,
+          );
+        } else if (futureConfig.useFutureDateAsShipDate && hasShipDate && !hasFutureDate) {
+          // shipDate is already set from column mapping — no overwrite needed
+          console.log(
+            `[FutureStock] Item ${item.sku || item.style}: Keeping existing ship date ${item.shipDate} (no futureDate column)`,
           );
         }
 
