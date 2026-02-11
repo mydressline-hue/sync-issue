@@ -3210,7 +3210,7 @@ export async function registerRoutes(
         // Only parse first 10 rows for detection to minimize memory usage
         let detectedFormat: string | null = null;
         {
-          const detectWorkbook = XLSX.readFile(file.path, { sheetRows: 10 });
+          const detectWorkbook = XLSX.read(fs.readFileSync(file.path), { type: "buffer", sheetRows: 10 });
           const detectSheet = detectWorkbook.Sheets[detectWorkbook.SheetNames[0]];
           const sampleData = XLSX.utils.sheet_to_json(detectSheet, {
             header: 1,

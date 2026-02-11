@@ -438,7 +438,7 @@ export function parseIntelligentPivotFormat(
   options?: { sheetRows?: number },
 ): { headers: string[]; rows: any[][]; items: any[] } {
   const workbook = typeof bufferOrPath === "string"
-    ? XLSX.readFile(bufferOrPath, options?.sheetRows ? { sheetRows: options.sheetRows } : undefined)
+    ? XLSX.read(fs.readFileSync(bufferOrPath), { type: "buffer", ...(options?.sheetRows ? { sheetRows: options.sheetRows } : {}) })
     : XLSX.read(bufferOrPath, { type: "buffer", ...(options?.sheetRows ? { sheetRows: options.sheetRows } : {}) });
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
   const rawData = XLSX.utils.sheet_to_json(sheet, {
@@ -1673,7 +1673,7 @@ router.post("/analyze", upload.any(), async (req: Request, res: Response) => {
       );
     } else {
       // Read directly from disk with sheetRows limit — never loads full file into memory
-      const workbook = XLSX.readFile(primaryFile.path, { sheetRows: 30 });
+      const workbook = XLSX.read(fs.readFileSync(primaryFile.path), { type: "buffer", sheetRows: 30 });
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
       rawData = XLSX.utils.sheet_to_json(sheet, {
         header: 1,
@@ -1960,7 +1960,7 @@ router.post(
       let detectedPivotFormat: string | null = null;
       let sampleDataForGrouped: any[][] | null = null;
       {
-        const detectWb = XLSX.readFile(req.file.path, { sheetRows: 10 });
+        const detectWb = XLSX.read(fs.readFileSync(req.file.path), { type: "buffer", sheetRows: 10 });
         const detectSheet = detectWb.Sheets[detectWb.SheetNames[0]];
         const sampleData = XLSX.utils.sheet_to_json(detectSheet, {
           header: 1,
@@ -1984,7 +1984,7 @@ router.post(
 
       if (config.formatType === "pivot_grouped" && (configOverride?.groupedPivotConfig || (dataSource as any)?.groupedPivotConfig)) {
         // Grouped pivot format — read from disk, limit rows for preview
-        const fullWb = XLSX.readFile(req.file.path, { sheetRows: 500 });
+        const fullWb = XLSX.read(fs.readFileSync(req.file.path), { type: "buffer", sheetRows: 500 });
         const fullSheet = fullWb.Sheets[fullWb.SheetNames[0]];
         const rawData = XLSX.utils.sheet_to_json(fullSheet, {
           header: 1,
@@ -2042,7 +2042,7 @@ router.post(
         };
       } else {
         // Row format preview — limit rows for memory safety
-        const previewWb = XLSX.readFile(req.file.path, { sheetRows: 500 });
+        const previewWb = XLSX.read(fs.readFileSync(req.file.path), { type: "buffer", sheetRows: 500 });
         const previewSheet = previewWb.Sheets[previewWb.SheetNames[0]];
         const previewBuffer = XLSX.write(previewWb, { type: "buffer", bookType: "xlsx" });
         parseResult = await parseWithEnhancedConfig(
