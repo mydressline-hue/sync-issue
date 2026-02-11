@@ -869,7 +869,7 @@ function parseSherriHillFormat(
   if (data.length < 2) return items;
 
   // DEBUG: Log stockConfig to diagnose text mappings issue
-  console.log(`[SherriHill] stockConfig:`, JSON.stringify(config.stockConfig));
+  // stockConfig logged only at debug level
   console.log(
     `[SherriHill] textMappings:`,
     JSON.stringify(config.stockConfig?.textMappings),
@@ -1925,19 +1925,6 @@ router.post(
                 ? { textMappings: dataSource.cleaningConfig.stockTextMappings }
                 : undefined),
           };
-          // DEBUG: Log what's being loaded for stock text mappings
-          console.log(
-            `[AIImport] dataSource.stockValueConfig:`,
-            JSON.stringify((dataSource as any).stockValueConfig),
-          );
-          console.log(
-            `[AIImport] dataSource.cleaningConfig?.stockTextMappings:`,
-            JSON.stringify(dataSource.cleaningConfig?.stockTextMappings),
-          );
-          console.log(
-            `[AIImport] enhancedConfig.stockValueConfig:`,
-            JSON.stringify(enhancedConfig.stockValueConfig),
-          );
         }
       }
 
@@ -2884,13 +2871,7 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
       `[AIImport] stockInfo: ${itemsWithStockInfo}/${itemsToSave.length} items have messages`,
     );
 
-    // DEBUG: Show first 3 items with their stockInfo
-    console.log(`[AIImport] Sample items being saved:`);
-    itemsToSave.slice(0, 3).forEach((item, i) => {
-      console.log(
-        `  Item ${i + 1}: sku="${item.sku}" stock=${item.stock} stockInfo="${item.stockInfo}"`,
-      );
-    });
+    // Sample items logged only at debug level
 
     // ============================================================
     // BUG FIX: Respect updateStrategy setting
