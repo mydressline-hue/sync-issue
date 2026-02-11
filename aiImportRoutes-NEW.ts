@@ -903,18 +903,32 @@ function parseGenericPivotFormat(
   const items: PivotItem[] = [];
   if (data.length < 2) return items;
 
+  const pc = config.pivotConfig;
+  const hasAIConfig = pc?.sizeColumns?.length > 0;
+
+  if (hasAIConfig) {
+    console.log(`[GenericPivot] Using AI-saved pivotConfig (${pc.sizeColumns.length} size columns)`);
+  }
+
+  // ── HEADER ROW DETECTION ──
   let headerRowIdx = 0;
   const sizePattern =
     /^(000|00|OOO|OO|0|02|04|06|08|2|4|6|8|10|12|14|16|18|20|22|24|26|28|30|32|34|36|14W|16W|18W|20W|22W|24W|26W|28W|30W|32W|XS|S|SM|M|MD|L|LG|XL|XXL|XXXL|SS|LL|LLL|UNIT|DOZEN|DOZN)$/i;
 
-  for (let i = 0; i < Math.min(5, data.length); i++) {
-    const row = data[i];
-    const sizeCount = row.filter((c: any) =>
-      sizePattern.test(String(c ?? "").trim()),
-    ).length;
-    if (sizeCount >= 5) {
-      headerRowIdx = i;
-      break;
+  if (hasAIConfig && pc.headerRowIndex !== undefined) {
+    // Use AI-detected header row position
+    headerRowIdx = pc.headerRowIndex;
+  } else {
+    // Fallback: scan first 5 rows for row with 5+ size matches
+    for (let i = 0; i < Math.min(5, data.length); i++) {
+      const row = data[i];
+      const sizeCount = row.filter((c: any) =>
+        sizePattern.test(String(c ?? "").trim()),
+      ).length;
+      if (sizeCount >= 5) {
+        headerRowIdx = i;
+        break;
+      }
     }
   }
 
@@ -922,19 +936,36 @@ function parseGenericPivotFormat(
   const headers = headerRow.map((h: any) => String(h ?? "").trim());
   const headersLower = headers.map((h: string) => h.toLowerCase());
 
-  const styleIdx = resolveColumnIndex(config, headersLower, "style", [
+  // ── BRIDGE AI PIVOT CONFIG → COLUMN MAPPING ──
+  // If AI saved specific column names in pivotConfig, bridge them into columnMapping
+  // so resolveColumnIndex picks them up. Only fill fields not already set by user.
+  const effectiveConfig: UniversalParserConfig = hasAIConfig
+    ? {
+        ...config,
+        columnMapping: {
+          ...config.columnMapping,
+          ...(pc.styleColumn && !config.columnMapping?.style ? { style: pc.styleColumn } : {}),
+          ...(pc.colorColumn && !config.columnMapping?.color ? { color: pc.colorColumn } : {}),
+          ...(pc.priceColumn && !config.columnMapping?.price ? { price: pc.priceColumn } : {}),
+          ...(pc.dateColumn && !config.columnMapping?.shipDate ? { shipDate: pc.dateColumn } : {}),
+          ...(pc.statusColumn && !config.columnMapping?.discontinued ? { discontinued: pc.statusColumn } : {}),
+        },
+      }
+    : config;
+
+  const styleIdx = resolveColumnIndex(effectiveConfig, headersLower, "style", [
     "style", "code", "item",
   ]);
-  const colorIdx = resolveColumnIndex(config, headersLower, "color", [
+  const colorIdx = resolveColumnIndex(effectiveConfig, headersLower, "color", [
     "color", "colour",
   ]);
-  const dateIdx = resolveColumnIndex(config, headersLower, "shipDate", [
+  const dateIdx = resolveColumnIndex(effectiveConfig, headersLower, "shipDate", [
     "date", "eta", "due", "available",
   ]);
-  const statusIdx = resolveColumnIndex(config, headersLower, "discontinued", [
+  const statusIdx = resolveColumnIndex(effectiveConfig, headersLower, "discontinued", [
     "status", "discontinued", "active",
   ]);
-  const priceIdx = resolveColumnIndex(config, headersLower, "price", [
+  const priceIdx = resolveColumnIndex(effectiveConfig, headersLower, "price", [
     "price", "wholesale", "cost", "msrp", "line price",
   ]);
 
@@ -947,16 +978,29 @@ function parseGenericPivotFormat(
     ? configKeywords.map((v: string) => v.toLowerCase().trim())
     : ["discontinued", "disc", "inactive", "d", "no", "n", "false", "0", "cl"];
 
+  // ── SIZE COLUMN DETECTION ──
   const sizeColumns: { index: number; size: string }[] = [];
-  for (let i = 0; i < headers.length; i++) {
-    const h = String(headerRow[i] ?? "").trim();
-    if (sizePattern.test(h)) {
-      let normalizedSize = h;
-      if (h.toUpperCase() === "OOO") normalizedSize = "000";
-      else if (h.toUpperCase() === "OO") normalizedSize = "00";
-      // Normalize leading-zero sizes: "02"→"2", "04"→"4", "06"→"6", "08"→"8"
-      else if (/^0\d$/.test(h)) normalizedSize = h.replace(/^0/, "");
-      sizeColumns.push({ index: i, size: normalizedSize });
+  if (hasAIConfig) {
+    // Use exact columns saved by AI detection — handles ANY size format
+    for (const sizeName of pc.sizeColumns) {
+      const idx = headersLower.findIndex((h: string) => h === sizeName.toLowerCase());
+      if (idx >= 0) {
+        sizeColumns.push({ index: idx, size: sizeName });
+      }
+    }
+    console.log(`[GenericPivot] AI config matched ${sizeColumns.length}/${pc.sizeColumns.length} size columns in headers`);
+  } else {
+    // Fallback: hardcoded regex detection (existing data sources use this path)
+    for (let i = 0; i < headers.length; i++) {
+      const h = String(headerRow[i] ?? "").trim();
+      if (sizePattern.test(h)) {
+        let normalizedSize = h;
+        if (h.toUpperCase() === "OOO") normalizedSize = "000";
+        else if (h.toUpperCase() === "OO") normalizedSize = "00";
+        // Normalize leading-zero sizes: "02"→"2", "04"→"4", "06"→"6", "08"→"8"
+        else if (/^0\d$/.test(h)) normalizedSize = h.replace(/^0/, "");
+        sizeColumns.push({ index: i, size: normalizedSize });
+      }
     }
   }
 
@@ -966,7 +1010,12 @@ function parseGenericPivotFormat(
     ? filename.toLowerCase().includes("discontinued")
     : false;
 
-  for (let rowIdx = headerRowIdx + 1; rowIdx < data.length; rowIdx++) {
+  // ── DATA START ROW ──
+  const dataStartRow = (hasAIConfig && pc.dataStartRow !== undefined)
+    ? pc.dataStartRow
+    : headerRowIdx + 1;
+
+  for (let rowIdx = dataStartRow; rowIdx < data.length; rowIdx++) {
     const row = data[rowIdx];
     if (!row || row.length < 3) continue;
 
