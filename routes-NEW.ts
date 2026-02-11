@@ -1505,11 +1505,12 @@ export async function performCombineImport(dataSourceId: string): Promise<{
   let allRows: any[][] = [];
   let columnMapping = (dataSource.columnMapping as any) || {};
   const cleaningConfig = (dataSource.cleaningConfig as any) || {};
+  const pivotConfig = (dataSource as any).pivotConfig || {};
   console.log(
     `[performCombineImport] columnMapping keys: ${JSON.stringify(Object.keys(columnMapping))}, isEmpty: ${!columnMapping || Object.keys(columnMapping).length === 0}`,
   );
   console.log(
-    `[performCombineImport] cleaningConfig.pivotedFormat: ${JSON.stringify(cleaningConfig?.pivotedFormat || "none")}`,
+    `[performCombineImport] cleaningConfig.pivotedFormat: ${JSON.stringify(cleaningConfig?.pivotedFormat || "none")}, pivotConfig: ${JSON.stringify(pivotConfig)}`,
   );
 
   // AUTO-DETECT column mapping when empty (needed for email import where
@@ -1612,10 +1613,11 @@ export async function performCombineImport(dataSourceId: string): Promise<{
 
     const isPivotedPreParsed =
       hasStandardHeaders &&
-      (cleaningConfig?.pivotedFormat?.enabled || // Original condition
+      (cleaningConfig?.pivotedFormat?.enabled || // UI-configured pivoted format
+        pivotConfig?.enabled || // Auto-detected pivot format (saved during upload)
         !columnMappingMatchesHeaders); // Staged file headers don't match columnMapping
     console.log(
-      `[performCombineImport] File ${fileIndex}: isPivotedPreParsed=${isPivotedPreParsed}, hasStandardHeaders=${hasStandardHeaders}, columnMappingMatchesHeaders=${columnMappingMatchesHeaders}, pivotedFormat.enabled=${cleaningConfig?.pivotedFormat?.enabled}`,
+      `[performCombineImport] File ${fileIndex}: isPivotedPreParsed=${isPivotedPreParsed}, hasStandardHeaders=${hasStandardHeaders}, columnMappingMatchesHeaders=${columnMappingMatchesHeaders}, pivotedFormat.enabled=${cleaningConfig?.pivotedFormat?.enabled}, pivotConfig.enabled=${pivotConfig?.enabled}`,
     );
 
     const getColValue = (row: any[], colName: string) => {

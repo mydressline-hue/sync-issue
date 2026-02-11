@@ -156,6 +156,15 @@ function parseDateValue(dateVal: any): string | undefined {
     if (!isNaN(numVal) && numVal > 40000 && numVal < 55000) {
       return excelSerialToDate(numVal);
     }
+    // Handle 2-digit years: M/D/YY or MM/DD/YY (e.g. "1/5/26" → 2026-01-05, not 1926)
+    const twoDigitYearMatch = trimmed.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2})$/);
+    if (twoDigitYearMatch) {
+      const month = twoDigitYearMatch[1].padStart(2, "0");
+      const day = twoDigitYearMatch[2].padStart(2, "0");
+      let year = parseInt(twoDigitYearMatch[3], 10);
+      year = year < 50 ? 2000 + year : 1900 + year;
+      return `${year}-${month}-${day}`;
+    }
     // Try parsing as a real date string (e.g. "2/17/2026", "2026-03-15")
     const parsed = new Date(trimmed);
     if (!isNaN(parsed.getTime()) && parsed.getFullYear() >= 1900 && parsed.getFullYear() <= 2100) {
@@ -339,9 +348,9 @@ export function autoDetectPivotFormat(
   );
   if (dateHeaders.length >= 3) return "pr_date_headers";
 
-  // Generic Pivot — include leading-zero sizes (02,04,06,08) and extended sizes (32,34,36)
+  // Generic Pivot — include leading-zero sizes, extended sizes, W/plus sizes, letter sizes, units
   const sizePattern =
-    /^(000|00|OOO|OO|0|02|04|06|08|2|4|6|8|10|12|14|16|18|20|22|24|26|28|30|32|34|36)$/i;
+    /^(000|00|OOO|OO|0|02|04|06|08|2|4|6|8|10|12|14|16|18|20|22|24|26|28|30|32|34|36|14W|16W|18W|20W|22W|24W|26W|28W|30W|32W|XS|S|SM|M|MD|L|LG|XL|XXL|XXXL|SS|LL|LLL|UNIT|DOZEN|DOZN)$/i;
   const sizeColumns = headers.filter((h: string) => sizePattern.test(h));
 
   if (sizeColumns.length >= 5) {
@@ -896,7 +905,7 @@ function parseGenericPivotFormat(
 
   let headerRowIdx = 0;
   const sizePattern =
-    /^(000|00|OOO|OO|0|02|04|06|08|2|4|6|8|10|12|14|16|18|20|22|24|26|28|30|32|34|36)$/i;
+    /^(000|00|OOO|OO|0|02|04|06|08|2|4|6|8|10|12|14|16|18|20|22|24|26|28|30|32|34|36|14W|16W|18W|20W|22W|24W|26W|28W|30W|32W|XS|S|SM|M|MD|L|LG|XL|XXL|XXXL|SS|LL|LLL|UNIT|DOZEN|DOZN)$/i;
 
   for (let i = 0; i < Math.min(5, data.length); i++) {
     const row = data[i];
