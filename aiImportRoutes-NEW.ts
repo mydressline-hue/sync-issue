@@ -891,8 +891,7 @@ function parseGenericPivotFormat(
     "color", "colour",
   ]);
   const dateIdx = resolveColumnIndex(config, headersLower, "shipDate", [
-    "earliest available date", "available date", "earliest available",
-    "date", "eta", "due", "ship date", "delivery date", "ready date",
+    "date", "eta", "due", "available",
   ]);
   const statusIdx = resolveColumnIndex(config, headersLower, "discontinued", [
     "status", "discontinued", "active",
@@ -1441,28 +1440,15 @@ function parseRowFormat(
   const sizeIdx = resolveColumnIndex(config, headersLower, "size", [
     "size", "_size", "sizename",
   ]);
-  // FIX: Detect date column first, then stock. If both claim the same column
-  // (e.g. "Earliest Available Date" matches both "available" for stock and "available" for date),
-  // the date interpretation wins and stock re-resolves without "available".
-  const dateIdx = resolveColumnIndex(config, headersLower, "shipDate", [
-    "earliest available date", "available date", "earliest available",
-    "eta", "ship date", "ship", "date", "arrival", "expected", "future ship",
-    "delivery date", "ready date",
-  ]);
-  let stockIdx = resolveColumnIndex(config, headersLower, "stock", [
+  const stockIdx = resolveColumnIndex(config, headersLower, "stock", [
     "stock", "qty", "quantity", "available", "onhand", "ats_qty",
     "opentosale", "inventory", "_inventory_level", "immediate stock",
-    "available qty", "available quantity",
   ]);
-  // If stock and date resolved to the same column, date wins — re-resolve stock without "available"
-  if (stockIdx >= 0 && stockIdx === dateIdx) {
-    stockIdx = resolveColumnIndex(config, headersLower, "stock", [
-      "stock", "qty", "quantity", "onhand", "ats_qty",
-      "opentosale", "inventory", "_inventory_level", "immediate stock",
-    ]);
-  }
   const priceIdx = resolveColumnIndex(config, headersLower, "price", [
     "price", "wholesale", "cost", "line price", "msrp", "_price",
+  ]);
+  const dateIdx = resolveColumnIndex(config, headersLower, "shipDate", [
+    "eta", "ship", "date", "arrival", "expected", "future ship",
   ]);
   const statusIdx = resolveColumnIndex(config, headersLower, "discontinued", [
     "status", "discontinued", "active", "_status",
