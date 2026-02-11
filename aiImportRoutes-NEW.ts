@@ -136,6 +136,44 @@ function excelSerialToDate(serial: number): string {
   return jsDate.toISOString().split("T")[0];
 }
 
+/**
+ * Parse a date value that may be a number, numeric string (Excel serial), or text date.
+ * With raw:false, Excel serial dates arrive as strings like "46065" — must detect and convert.
+ */
+function parseDateValue(dateVal: any): string | undefined {
+  if (!dateVal) return undefined;
+  // Numeric Excel serial (when raw:true)
+  if (typeof dateVal === "number" && dateVal > 40000 && dateVal < 55000) {
+    return excelSerialToDate(dateVal);
+  }
+  if (typeof dateVal === "string") {
+    const trimmed = dateVal.trim();
+    if (!trimmed || trimmed.toLowerCase() === "n/a" || trimmed.toLowerCase() === "tbd") {
+      return undefined;
+    }
+    // String that looks like Excel serial (when raw:false converts number to string)
+    const numVal = Number(trimmed);
+    if (!isNaN(numVal) && numVal > 40000 && numVal < 55000) {
+      return excelSerialToDate(numVal);
+    }
+    // Handle 2-digit years: M/D/YY or MM/DD/YY (e.g. "1/5/26" → 2026-01-05, not 1926)
+    const twoDigitYearMatch = trimmed.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2})$/);
+    if (twoDigitYearMatch) {
+      const month = twoDigitYearMatch[1].padStart(2, "0");
+      const day = twoDigitYearMatch[2].padStart(2, "0");
+      let year = parseInt(twoDigitYearMatch[3], 10);
+      year = year < 50 ? 2000 + year : 1900 + year;
+      return `${year}-${month}-${day}`;
+    }
+    // Try parsing as a real date string (e.g. "2/17/2026", "2026-03-15")
+    const parsed = new Date(trimmed);
+    if (!isNaN(parsed.getTime()) && parsed.getFullYear() >= 1900 && parsed.getFullYear() <= 2100) {
+      return parsed.toISOString().split("T")[0];
+    }
+  }
+  return undefined;
+}
+
 function parseStockValue(
   value: any,
   textMappings?:
@@ -310,9 +348,9 @@ export function autoDetectPivotFormat(
   );
   if (dateHeaders.length >= 3) return "pr_date_headers";
 
-  // Generic Pivot — include leading-zero sizes (02,04,06,08) and extended sizes (32,34,36)
+  // Generic Pivot — include leading-zero sizes, extended sizes, W/plus sizes, letter sizes, units
   const sizePattern =
-    /^(000|00|OOO|OO|0|02|04|06|08|2|4|6|8|10|12|14|16|18|20|22|24|26|28|30|32|34|36)$/i;
+    /^(000|00|OOO|OO|0|02|04|06|08|2|4|6|8|10|12|14|16|18|20|22|24|26|28|30|32|34|36|14W|16W|18W|20W|22W|24W|26W|28W|30W|32W|XS|S|SM|M|MD|L|LG|XL|XXL|XXXL|SS|LL|LLL|UNIT|DOZEN|DOZN)$/i;
   const sizeColumns = headers.filter((h: string) => sizePattern.test(h));
 
   if (sizeColumns.length >= 5) {
@@ -841,9 +879,7 @@ function parseSherriHillFormat(
         dateVal !== "&ndash; " &&
         dateVal !== "–"
       ) {
-        if (typeof dateVal === "number" && dateVal > 40000) {
-          shipDate = excelSerialToDate(dateVal);
-        }
+        shipDate = parseDateValue(dateVal);
       }
 
       if (stock > 0 || (shipDate && isValidShipDate(shipDate))) {
@@ -869,7 +905,7 @@ function parseGenericPivotFormat(
 
   let headerRowIdx = 0;
   const sizePattern =
-    /^(000|00|OOO|OO|0|02|04|06|08|2|4|6|8|10|12|14|16|18|20|22|24|26|28|30|32|34|36)$/i;
+    /^(000|00|OOO|OO|0|02|04|06|08|2|4|6|8|10|12|14|16|18|20|22|24|26|28|30|32|34|36|14W|16W|18W|20W|22W|24W|26W|28W|30W|32W|XS|S|SM|M|MD|L|LG|XL|XXL|XXXL|SS|LL|LLL|UNIT|DOZEN|DOZN)$/i;
 
   for (let i = 0; i < Math.min(5, data.length); i++) {
     const row = data[i];
@@ -945,19 +981,7 @@ function parseGenericPivotFormat(
 
     let shipDate: string | undefined;
     if (dateIdx >= 0) {
-      const dateVal = row[dateIdx];
-      if (dateVal && typeof dateVal === "number" && dateVal > 40000) {
-        shipDate = excelSerialToDate(dateVal);
-      } else if (dateVal && typeof dateVal === "string") {
-        // FIX: Handle text dates (e.g., "2025-03-15", "3/15/2025", "Mar 15, 2025")
-        const dateStr = dateVal.trim();
-        if (dateStr && dateStr.toLowerCase() !== "n/a" && dateStr.toLowerCase() !== "tbd") {
-          const parsed = new Date(dateStr);
-          if (!isNaN(parsed.getTime())) {
-            shipDate = parsed.toISOString().split("T")[0];
-          }
-        }
-      }
+      shipDate = parseDateValue(row[dateIdx]);
     }
 
     let isDiscontinued = isFileDiscontinued;
@@ -1445,8 +1469,8 @@ function parseRowFormat(
     "size", "_size", "sizename",
   ]);
   const stockIdx = resolveColumnIndex(config, headersLower, "stock", [
-    "stock", "qty", "quantity", "available", "onhand", "ats_qty",
-    "opentosale", "inventory", "_inventory_level", "immediate stock",
+    "stock", "qty", "quantity", "inventory", "_inventory_level",
+    "available", "onhand", "ats_qty", "opentosale", "immediate stock",
   ]);
   const priceIdx = resolveColumnIndex(config, headersLower, "price", [
     "price", "wholesale", "cost", "line price", "msrp", "_price",
@@ -1490,12 +1514,7 @@ function parseRowFormat(
 
     let shipDate: string | undefined;
     if (dateIdx >= 0) {
-      const dateVal = row[dateIdx];
-      if (dateVal && typeof dateVal === "number" && dateVal > 40000) {
-        shipDate = excelSerialToDate(dateVal);
-      } else if (dateVal && typeof dateVal === "string" && dateVal.trim()) {
-        shipDate = dateVal.trim();
-      }
+      shipDate = parseDateValue(row[dateIdx]);
     }
 
     let discontinued = false;
@@ -1543,6 +1562,7 @@ router.post("/analyze", upload.any(), async (req: Request, res: Response) => {
         const data = XLSX.utils.sheet_to_json(sheet, {
           header: 1,
           defval: "",
+          raw: false, // Prevent scientific notation corruption
         }) as any[][];
 
         if (headerRow === null && data.length > 0) {
@@ -2037,6 +2057,7 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
         const data = XLSX.utils.sheet_to_json(sheet, {
           header: 1,
           defval: "",
+          raw: false, // Prevent scientific notation corruption (e.g. "1921E0136")
         }) as any[][];
 
         if (headerRow === null && data.length > 0) {
