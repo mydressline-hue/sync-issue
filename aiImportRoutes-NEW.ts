@@ -2153,6 +2153,15 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
       cleaningConfig: (dataSource as any).cleaningConfig,
     };
 
+    // =====================================================================
+    // SETUP-ONLY IMPORT: Limit to 1000 rows to prevent OOM
+    // /execute is only called from the UI during data source setup.
+    // The actual full import runs later via scheduler (executeAIImport →
+    // executeImport in importEngine) which streams from URL/email.
+    // =====================================================================
+    const SETUP_ROW_LIMIT = 1000;
+    console.log(`[AIImport] Setup import — limiting to ${SETUP_ROW_LIMIT} rows (full sync runs on schedule)`);
+
     // Consolidate multiple files if in multi-file mode
     let rawData: any[][] = [];
     const primaryFile = files[0];
@@ -2165,7 +2174,8 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
       let headerRow: any[] | null = null;
 
       for (const file of files) {
-        const wb = XLSX.read(fs.readFileSync(file.path), { type: "buffer" });
+        // Limit rows per file during setup
+        const wb = XLSX.read(fs.readFileSync(file.path), { type: "buffer", sheetRows: SETUP_ROW_LIMIT });
         const sheet = wb.Sheets[wb.SheetNames[0]];
         const data = XLSX.utils.sheet_to_json(sheet, {
           header: 1,
@@ -2185,11 +2195,13 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
       );
 
       // Write consolidated data to a temp file so parsers can read from disk
-      const newWorkbook = XLSX.utils.book_new();
-      const newSheet = XLSX.utils.aoa_to_sheet(rawData);
-      XLSX.utils.book_append_sheet(newWorkbook, newSheet, "Consolidated");
-      consolidatedFilePath = path.join(os.tmpdir(), `consolidated-${Date.now()}.xlsx`);
-      fs.writeFileSync(consolidatedFilePath, Buffer.from(XLSX.write(newWorkbook, { type: "buffer", bookType: "xlsx" })));
+      {
+        const newWorkbook = XLSX.utils.book_new();
+        const newSheet = XLSX.utils.aoa_to_sheet(rawData);
+        XLSX.utils.book_append_sheet(newWorkbook, newSheet, "Consolidated");
+        consolidatedFilePath = path.join(os.tmpdir(), `consolidated-${Date.now()}.xlsx`);
+        fs.writeFileSync(consolidatedFilePath, Buffer.from(XLSX.write(newWorkbook, { type: "buffer", bookType: "xlsx" })));
+      }
       console.log(
         `[AIImport] Wrote consolidated file to ${consolidatedFilePath}`,
       );
@@ -2225,11 +2237,10 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
     }
 
     if (config.formatType === "pivot_grouped" && (overrideConfig?.groupedPivotConfig || (dataSource as any).groupedPivotConfig)) {
-      // Grouped pivot format — read full data from disk
+      // Grouped pivot format — read limited rows from disk for setup
       if (rawData.length <= 10) {
-        // We only loaded sample, need full data for grouped pivot
         {
-          const fullWb = XLSX.read(fs.readFileSync(consolidatedFilePath), { type: "buffer" });
+          const fullWb = XLSX.read(fs.readFileSync(consolidatedFilePath), { type: "buffer", sheetRows: SETUP_ROW_LIMIT });
           const fullSheet = fullWb.Sheets[fullWb.SheetNames[0]];
           rawData = XLSX.utils.sheet_to_json(fullSheet, { header: 1, defval: "" }) as any[][];
         }
@@ -2260,13 +2271,14 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
         columnMapping: config.columnMapping,
       };
 
-      // Read from disk — no buffer in memory
+      // Read from disk — limited rows for setup import
       const pivotResult = parseIntelligentPivotFormat(
         consolidatedFilePath,
         actualFormat,
         universalConfig,
         dataSource.name,
         primaryFile.originalname,
+        { sheetRows: SETUP_ROW_LIMIT },
       );
 
       parseResult = {
@@ -2284,12 +2296,23 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
         warnings: [],
       };
     } else {
-      // Row format — read from disk
-      parseResult = await parseWithEnhancedConfig(
-        fs.readFileSync(primaryFile.path),
-        config,
-        dataSourceId,
-      );
+      // Row format — read limited rows from disk for setup import
+      // Create a small buffer with only SETUP_ROW_LIMIT rows instead of full file
+      {
+        const limitedWb = XLSX.read(fs.readFileSync(primaryFile.path), {
+          type: "buffer",
+          sheetRows: SETUP_ROW_LIMIT,
+        });
+        const limitedBuf = Buffer.from(
+          XLSX.write(limitedWb, { type: "buffer", bookType: "xlsx" }),
+        );
+        // limitedWb goes out of scope, pass small buffer to parser
+        parseResult = await parseWithEnhancedConfig(
+          limitedBuf,
+          config,
+          dataSourceId,
+        );
+      }
     }
 
     if (!parseResult.success) {
