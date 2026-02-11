@@ -16385,10 +16385,10 @@ export async function registerRoutes(
           : 100;
 
       // How many data sources have items vs total
-      const dsWithItems = dataSourcesWithStats.filter(
+      const dsWithItems = dataSources.filter(
         (ds: any) => Number(ds.itemCount) > 0,
       ).length;
-      const dsWithImportLog = dataSourcesWithStats.filter(
+      const dsWithImportLog = dataSources.filter(
         (ds: any) => ds.lastImport !== null,
       ).length;
 
