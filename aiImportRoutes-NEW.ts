@@ -944,6 +944,15 @@ function parseGenericPivotFormat(
       const dateVal = row[dateIdx];
       if (dateVal && typeof dateVal === "number" && dateVal > 40000) {
         shipDate = excelSerialToDate(dateVal);
+      } else if (dateVal && typeof dateVal === "string") {
+        // FIX: Handle text dates (e.g., "2025-03-15", "3/15/2025", "Mar 15, 2025")
+        const dateStr = dateVal.trim();
+        if (dateStr && dateStr.toLowerCase() !== "n/a" && dateStr.toLowerCase() !== "tbd") {
+          const parsed = new Date(dateStr);
+          if (!isNaN(parsed.getTime())) {
+            shipDate = parsed.toISOString().split("T")[0];
+          }
+        }
       }
     }
 
