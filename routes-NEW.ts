@@ -3259,7 +3259,7 @@ export async function registerRoutes(
             columnMapping: (dataSource as any).columnMapping,
           };
           const pivotResult = parseIntelligentPivotFormat(
-            file.buffer,
+            file.path,
             actualFormat,
             universalConfig,
             dataSource.name,

@@ -430,13 +430,16 @@ export function autoDetectPivotFormat(
 // ============================================================
 
 export function parseIntelligentPivotFormat(
-  buffer: Buffer,
+  bufferOrPath: Buffer | string,
   formatType: string,
   config: UniversalParserConfig,
   dataSourceName?: string,
   filename?: string,
+  options?: { sheetRows?: number },
 ): { headers: string[]; rows: any[][]; items: any[] } {
-  const workbook = XLSX.read(buffer, { type: "buffer" });
+  const workbook = typeof bufferOrPath === "string"
+    ? XLSX.readFile(bufferOrPath, options?.sheetRows ? { sheetRows: options.sheetRows } : undefined)
+    : XLSX.read(bufferOrPath, { type: "buffer", ...(options?.sheetRows ? { sheetRows: options.sheetRows } : {}) });
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
   const rawData = XLSX.utils.sheet_to_json(sheet, {
     header: 1,
@@ -1980,8 +1983,8 @@ router.post(
       let parseResult: any;
 
       if (config.formatType === "pivot_grouped" && (configOverride?.groupedPivotConfig || (dataSource as any)?.groupedPivotConfig)) {
-        // Grouped pivot format — needs full data, parse once
-        const fullWb = XLSX.read(req.file.buffer, { type: "buffer" });
+        // Grouped pivot format — read from disk, limit rows for preview
+        const fullWb = XLSX.readFile(req.file.path, { sheetRows: 500 });
         const fullSheet = fullWb.Sheets[fullWb.SheetNames[0]];
         const rawData = XLSX.utils.sheet_to_json(fullSheet, {
           header: 1,
@@ -2012,12 +2015,15 @@ router.post(
           columnMapping: config.columnMapping,
         };
 
+        // Preview only needs ~100 items — limit rows parsed to save memory
+        // 500 sheet rows is enough for most pivot files (each row = 1 style-color combo)
         const pivotResult = parseIntelligentPivotFormat(
-          req.file.buffer,
+          req.file.path,
           actualFormat,
           universalConfig,
           dataSource?.name,
           req.file.originalname,
+          { sheetRows: 500 },
         );
 
         parseResult = {
@@ -2035,8 +2041,12 @@ router.post(
           warnings: [],
         };
       } else {
+        // Row format preview — limit rows for memory safety
+        const previewWb = XLSX.readFile(req.file.path, { sheetRows: 500 });
+        const previewSheet = previewWb.Sheets[previewWb.SheetNames[0]];
+        const previewBuffer = XLSX.write(previewWb, { type: "buffer", bookType: "xlsx" });
         parseResult = await parseWithEnhancedConfig(
-          req.file.buffer,
+          previewBuffer,
           config,
           dataSourceId,
         );
