@@ -535,6 +535,22 @@ export async function parseWithEnhancedConfig(
       const workbook = XLSX.read(buffer, { type: "buffer", cellDates: true });
       const sheetName = workbook.SheetNames[0];
       const sheet = workbook.Sheets[sheetName];
+      // Fix dirty Excel files with range extending to col XFD (16384 columns)
+      const sheetRef = sheet["!ref"];
+      if (sheetRef) {
+        const rng = XLSX.utils.decode_range(sheetRef);
+        if (rng.e.c > 100) {
+          let mc = 0;
+          for (let r = rng.s.r; r <= Math.min(rng.e.r, 10); r++) {
+            for (let c = rng.e.c; c >= mc; c--) {
+              const cell = sheet[XLSX.utils.encode_cell({ r, c })];
+              if (cell && cell.v !== undefined && cell.v !== null && cell.v !== "") { if (c > mc) mc = c; break; }
+            }
+          }
+          const nc = mc + 2;
+          if (nc < rng.e.c) { rng.e.c = nc; sheet["!ref"] = XLSX.utils.encode_range(rng); }
+        }
+      }
       rawData = XLSX.utils.sheet_to_json(sheet, {
         header: 1,
         defval: "",

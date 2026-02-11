@@ -20,6 +20,7 @@ import { storage } from "./storage";
 import {
   autoDetectPivotFormat,
   parseIntelligentPivotFormat,
+  fixSheetRange,
   type UniversalParserConfig,
 } from "./aiImportRoutes";
 import {
@@ -401,6 +402,7 @@ export async function executeImport(
       for (const file of fileBuffers) {
         const wb = XLSX.read(file.buffer, { type: "buffer" });
         const sheet = wb.Sheets[wb.SheetNames[0]];
+        fixSheetRange(sheet);
         const data = XLSX.utils.sheet_to_json(sheet, {
           header: 1,
           defval: "",
@@ -417,6 +419,7 @@ export async function executeImport(
     } else {
       const workbook = XLSX.read(primaryFile.buffer, { type: "buffer" });
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      fixSheetRange(sheet);
       rawData = XLSX.utils.sheet_to_json(sheet, {
         header: 1,
         defval: "",
@@ -489,6 +492,55 @@ export async function executeImport(
       headers = pivotResult.headers;
       rows = pivotResult.rows;
       items = pivotResult.items;
+
+      // If pivot parser returned 0 items and auto-detection didn't confirm the format,
+      // the saved formatType is wrong for this file. Fall back to row-based parsing
+      // and correct the saved format so future imports don't repeat this.
+      if (items.length === 0 && !detectedPivotFormat) {
+        console.log(`${logPrefix} Pivot parser returned 0 items and auto-detection didn't confirm format — falling back to row parser`);
+        if (source === "ai_import") {
+          const { parseWithEnhancedConfig } = await import("./enhancedImportProcessor");
+          const parseResult = await parseWithEnhancedConfig(
+            primaryFile.buffer,
+            {
+              formatType: "row",
+              columnMapping: dsConfig.columnMapping,
+              pivotConfig: dsConfig.pivotConfig,
+              discontinuedConfig: dsConfig.discontinuedConfig,
+              futureStockConfig: dsConfig.futureStockConfig,
+              stockValueConfig: dsConfig.stockValueConfig,
+              cleaningConfig,
+            },
+            dataSourceId,
+          );
+          if (parseResult.success && parseResult.items.length > 0) {
+            items = parseResult.items;
+            rows = rawData;
+            console.log(`${logPrefix} Row parser fallback found ${items.length} items — correcting saved format to "row"`);
+            await storage.updateDataSource(dataSourceId, {
+              formatType: "row",
+              pivotConfig: null,
+            });
+          }
+        } else {
+          const { parseExcelToInventory } = await import("./importUtils");
+          const result = (parseExcelToInventory as any)(
+            consolidatedBuffer,
+            dsConfig.columnMapping,
+            cleaningConfig,
+          );
+          if (result.items?.length > 0) {
+            headers = result.headers;
+            rows = result.rows;
+            items = result.items;
+            console.log(`${logPrefix} Row parser fallback found ${items.length} items — correcting saved format to "row"`);
+            await storage.updateDataSource(dataSourceId, {
+              formatType: "row",
+              pivotConfig: null,
+            });
+          }
+        }
+      }
 
       // Save detected format for future imports
       if (detectedPivotFormat) {
