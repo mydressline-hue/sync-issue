@@ -1553,6 +1553,7 @@ router.post("/analyze", upload.any(), async (req: Request, res: Response) => {
         const data = XLSX.utils.sheet_to_json(sheet, {
           header: 1,
           defval: "",
+          raw: false, // Prevent scientific notation corruption
         }) as any[][];
 
         if (headerRow === null && data.length > 0) {
@@ -2047,6 +2048,7 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
         const data = XLSX.utils.sheet_to_json(sheet, {
           header: 1,
           defval: "",
+          raw: false, // Prevent scientific notation corruption (e.g. "1921E0136")
         }) as any[][];
 
         if (headerRow === null && data.length > 0) {
