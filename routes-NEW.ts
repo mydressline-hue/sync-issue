@@ -360,8 +360,8 @@ export async function processUrlDataSourceImport(
   }
 }
 
-// Configure multer for file uploads
-const upload = multer({ storage: multer.memoryStorage() });
+// Configure multer for file uploads (50MB limit to prevent OOM on large files)
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
 // Helper function to detect and parse Tarik Ediz pivoted format
 function parseTarikEdizFormat(
@@ -3160,33 +3160,36 @@ export async function registerRoutes(
         let pivotConfig = (dataSource as any).pivotConfig;
         console.log(`[Upload] pivotConfig:`, JSON.stringify(pivotConfig));
 
-        // ALWAYS detect format from file content using the shared detector
-        const workbook = XLSX.read(file.buffer, { type: "buffer" });
-        const sheet = workbook.Sheets[workbook.SheetNames[0]];
-        const rawData = XLSX.utils.sheet_to_json(sheet, {
-          header: 1,
-          defval: "",
-          raw: false,
-        }) as any[][];
-
+        // Detect format from file content using the shared detector
+        // Only parse first 10 rows for detection to minimize memory usage
         let detectedFormat: string | null = null;
-        if (rawData.length > 0) {
-          detectedFormat = autoDetectPivotFormat(
-            rawData,
-            dataSource.name,
-            file.originalname,
-          );
-          if (detectedFormat) {
-            console.log(
-              `[Upload] Shared detector found format: "${detectedFormat}"`,
+        {
+          const detectWorkbook = XLSX.read(file.buffer, { type: "buffer", sheetRows: 10 });
+          const detectSheet = detectWorkbook.Sheets[detectWorkbook.SheetNames[0]];
+          const sampleData = XLSX.utils.sheet_to_json(detectSheet, {
+            header: 1,
+            defval: "",
+            raw: false,
+          }) as any[][];
+          if (sampleData.length > 0) {
+            detectedFormat = autoDetectPivotFormat(
+              sampleData,
+              dataSource.name,
+              file.originalname,
             );
-            pivotConfig = { enabled: true, format: detectedFormat };
-            // Save the detected format for future imports
-            await storage.updateDataSource(dataSourceId, {
-              formatType: detectedFormat,
-              pivotConfig: { enabled: true, format: detectedFormat },
-            });
           }
+          // detectWorkbook, detectSheet, sampleData go out of scope here → GC can reclaim
+        }
+        if (detectedFormat) {
+          console.log(
+            `[Upload] Shared detector found format: "${detectedFormat}"`,
+          );
+          pivotConfig = { enabled: true, format: detectedFormat };
+          // Save the detected format for future imports
+          await storage.updateDataSource(dataSourceId, {
+            formatType: detectedFormat,
+            pivotConfig: { enabled: true, format: detectedFormat },
+          });
         }
 
         let headers: string[];
@@ -15879,59 +15882,67 @@ export async function registerRoutes(
         const { lastImportStats, cleaningConfig, validationConfig, expansionConfig, columnMapping, pivotConfig, ...light } = s;
         return light;
       });
-      const dataSourcesWithStats = await Promise.all(
-        allDataSources.map(async (ds) => {
-          const lastSync = ds.lastSync ? new Date(ds.lastSync) : null;
-          const hoursSinceSync = lastSync
-            ? (Date.now() - lastSync.getTime()) / (1000 * 60 * 60)
-            : null;
+      // Batch queries instead of N+1 (3 queries total instead of 63)
+      const [fileCounts, itemCounts, recentLogs] = await Promise.all([
+        db.select({ dataSourceId: uploadedFiles.dataSourceId, count: count() })
+          .from(uploadedFiles)
+          .groupBy(uploadedFiles.dataSourceId),
+        db.select({ dataSourceId: inventoryItems.dataSourceId, count: count() })
+          .from(inventoryItems)
+          .groupBy(inventoryItems.dataSourceId),
+        db.select({
+          dataSourceId: importLogs.dataSourceId,
+          status: importLogs.status,
+          importType: importLogs.importType,
+          itemsImported: importLogs.itemsImported,
+          startedAt: importLogs.startedAt,
+          errorMessage: importLogs.errorMessage,
+        })
+          .from(importLogs)
+          .orderBy(desc(importLogs.startedAt))
+          .limit(200),
+      ]);
 
-          let status: "active" | "pending" | "stale" | "error" = "active";
-          if (!lastSync) {
-            status = "pending";
-          } else if (hoursSinceSync && hoursSinceSync > 168) {
-            status = "stale";
-          }
+      // Build lookup maps
+      const fileCountMap = new Map(fileCounts.map(r => [r.dataSourceId, r.count]));
+      const itemCountMap = new Map(itemCounts.map(r => [r.dataSourceId, r.count]));
+      // Deduplicate: keep only the most recent log per data source
+      const lastImportMap = new Map<string, any>();
+      for (const log of recentLogs) {
+        if (log.dataSourceId && !lastImportMap.has(log.dataSourceId)) {
+          lastImportMap.set(log.dataSourceId, { status: log.status, importType: log.importType, itemsImported: log.itemsImported, startedAt: log.startedAt, errorMessage: log.errorMessage });
+        }
+      }
 
-          const isAutoSync =
-            ds.type === "email" || (ds.connectionDetails as any)?.autoSync;
+      const dataSources = allDataSources.map((ds) => {
+        const lastSync = ds.lastSync ? new Date(ds.lastSync) : null;
+        const hoursSinceSync = lastSync
+          ? (Date.now() - lastSync.getTime()) / (1000 * 60 * 60)
+          : null;
 
-          const [fileCountResult] = await db
-            .select({ count: count() })
-            .from(uploadedFiles)
-            .where(eq(uploadedFiles.dataSourceId, ds.id));
-          const [itemCountResult] = await db
-            .select({ count: count() })
-            .from(inventoryItems)
-            .where(eq(inventoryItems.dataSourceId, ds.id));
-          const [lastImportLog] = await db
-            .select({
-              status: importLogs.status,
-              importType: importLogs.importType,
-              itemsImported: importLogs.itemsImported,
-              startedAt: importLogs.startedAt,
-              errorMessage: importLogs.errorMessage,
-            })
-            .from(importLogs)
-            .where(eq(importLogs.dataSourceId, ds.id))
-            .orderBy(desc(importLogs.startedAt))
-            .limit(1);
+        let status: "active" | "pending" | "stale" | "error" = "active";
+        if (!lastSync) {
+          status = "pending";
+        } else if (hoursSinceSync && hoursSinceSync > 168) {
+          status = "stale";
+        }
 
-          return {
-            id: ds.id,
-            name: ds.name,
-            type: ds.type,
-            status,
-            isAutoSync,
-            lastSync: ds.lastSync,
-            hoursSinceSync: hoursSinceSync ? Math.round(hoursSinceSync) : null,
-            fileCount: fileCountResult?.count || 0,
-            itemCount: itemCountResult?.count || 0,
-            lastImport: lastImportLog || null,
-          };
-        }),
-      );
-      const dataSources = dataSourcesWithStats;
+        const isAutoSync =
+          ds.type === "email" || (ds.connectionDetails as any)?.autoSync;
+
+        return {
+          id: ds.id,
+          name: ds.name,
+          type: ds.type,
+          status,
+          isAutoSync,
+          lastSync: ds.lastSync,
+          hoursSinceSync: hoursSinceSync ? Math.round(hoursSinceSync) : null,
+          fileCount: fileCountMap.get(ds.id) || 0,
+          itemCount: itemCountMap.get(ds.id) || 0,
+          lastImport: lastImportMap.get(ds.id) || null,
+        };
+      });
 
       // Get Shopify store status
       const shopifyStores = await storage.getShopifyStores();

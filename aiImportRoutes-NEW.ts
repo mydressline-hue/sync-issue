@@ -51,7 +51,7 @@ import { executeImport } from "./importEngine";
 import { analyzeFileWithAI, parseGroupedPivotData, toEnhancedConfig } from "./universalParser";
 
 const router = Router();
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
 // ============================================================
 // TYPE DEFINITIONS
@@ -1625,7 +1625,9 @@ router.post("/analyze", upload.any(), async (req: Request, res: Response) => {
         `[AIImport] Consolidated ${rawData.length} total rows from ${files.length} files`,
       );
     } else {
-      const workbook = XLSX.read(primaryFile.buffer, { type: "buffer" });
+      // Parse only first 30 rows for detection — AI analysis only needs 25 sample rows
+      // This avoids loading huge spreadsheets entirely into memory for the /analyze endpoint
+      const workbook = XLSX.read(primaryFile.buffer, { type: "buffer", sheetRows: 30 });
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
       rawData = XLSX.utils.sheet_to_json(sheet, {
         header: 1,
@@ -1908,18 +1910,25 @@ router.post(
           configOverride?.stockValueConfig || enhancedConfig.stockValueConfig,
       };
 
-      const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
-      const sheet = workbook.Sheets[workbook.SheetNames[0]];
-      const rawData = XLSX.utils.sheet_to_json(sheet, {
-        header: 1,
-        defval: "",
-      }) as any[][];
-
-      const detectedPivotFormat = autoDetectPivotFormat(
-        rawData,
-        dataSource?.name,
-        req.file.originalname,
-      );
+      // Detect format using only first 10 rows to minimize memory
+      let detectedPivotFormat: string | null = null;
+      let sampleDataForGrouped: any[][] | null = null;
+      {
+        const detectWb = XLSX.read(req.file.buffer, { type: "buffer", sheetRows: 10 });
+        const detectSheet = detectWb.Sheets[detectWb.SheetNames[0]];
+        const sampleData = XLSX.utils.sheet_to_json(detectSheet, {
+          header: 1,
+          defval: "",
+        }) as any[][];
+        detectedPivotFormat = autoDetectPivotFormat(
+          sampleData,
+          dataSource?.name,
+          req.file.originalname,
+        );
+        // Keep sample for grouped pivot check below (small, only 10 rows)
+        sampleDataForGrouped = sampleData;
+        // detectWb goes out of scope → GC can reclaim
+      }
       const isPivotFormat =
         config.formatType?.startsWith("pivot") ||
         config.formatType === "pivoted" ||
@@ -1928,7 +1937,13 @@ router.post(
       let parseResult: any;
 
       if (config.formatType === "pivot_grouped" && (configOverride?.groupedPivotConfig || (dataSource as any)?.groupedPivotConfig)) {
-        // Grouped pivot format — use universal parser extractor
+        // Grouped pivot format — needs full data, parse once
+        const fullWb = XLSX.read(req.file.buffer, { type: "buffer" });
+        const fullSheet = fullWb.Sheets[fullWb.SheetNames[0]];
+        const rawData = XLSX.utils.sheet_to_json(fullSheet, {
+          header: 1,
+          defval: "",
+        }) as any[][];
         const gpConfig = configOverride?.groupedPivotConfig || (dataSource as any).groupedPivotConfig;
         console.log(`[AIImport Preview] Using grouped pivot parser`);
         const groupedResult = parseGroupedPivotData(rawData, gpConfig);
