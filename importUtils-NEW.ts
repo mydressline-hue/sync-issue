@@ -29,6 +29,36 @@ export {
 };
 
 /**
+ * Fix dirty Excel sheet ranges.
+ * Some Excel files have !ref extending to XFD (col 16384) even though
+ * only a few columns have data. sheet_to_json on such sheets creates
+ * millions of empty cells and crashes the process.
+ */
+function fixSheetRange(sheet: XLSX.WorkSheet): void {
+  const ref = sheet["!ref"];
+  if (!ref) return;
+  const range = XLSX.utils.decode_range(ref);
+  if (range.e.c <= 100) return;
+  let maxCol = 0;
+  const rowsToCheck = Math.min(range.e.r, 10);
+  for (let r = range.s.r; r <= rowsToCheck; r++) {
+    for (let c = range.e.c; c >= maxCol; c--) {
+      const addr = XLSX.utils.encode_cell({ r, c });
+      const cell = sheet[addr];
+      if (cell && cell.v !== undefined && cell.v !== null && cell.v !== "") {
+        if (c > maxCol) maxCol = c;
+        break;
+      }
+    }
+  }
+  const newLastCol = maxCol + 2;
+  if (newLastCol < range.e.c) {
+    range.e.c = newLastCol;
+    sheet["!ref"] = XLSX.utils.encode_range(range);
+  }
+}
+
+/**
  * Check if a sale file has discontinued styles registered.
  * Used to warn when importing regular files before their linked sale file.
  *
@@ -954,6 +984,7 @@ export function parseExcelToInventory(
 
     const workbook = XLSX.read(buffer, readOptions);
     const { sheet } = selectSheet(workbook, sheetConfig);
+    fixSheetRange(sheet);
     rawData = XLSX.utils.sheet_to_json(sheet, {
       header: 1,
       raw: false,
@@ -1488,6 +1519,7 @@ export function parsePivotedExcelToInventory(
 
   const workbook = XLSX.read(buffer, readOptions);
   const { sheet } = selectSheet(workbook, sheetConfig);
+  fixSheetRange(sheet);
   const rawData = XLSX.utils.sheet_to_json(sheet, {
     header: 1,
     defval: "",
@@ -2088,6 +2120,7 @@ export async function processEmailAttachment(
       try {
         const workbook = XLSX.read(buffer, { type: "buffer" });
         const sheet = workbook.Sheets[workbook.SheetNames[0]];
+        fixSheetRange(sheet);
         const rawData = XLSX.utils.sheet_to_json(sheet, {
           header: 1,
           defval: "",
@@ -3576,6 +3609,7 @@ export function isOTSFormat(buffer: Buffer): boolean {
   try {
     const workbook = XLSX.read(buffer, { type: "buffer" });
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    fixSheetRange(sheet);
     const data = XLSX.utils.sheet_to_json(sheet, {
       header: 1,
       defval: "",
@@ -3622,6 +3656,7 @@ export function parseOTSFormat(
 
   const workbook = XLSX.read(buffer, { type: "buffer" });
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  fixSheetRange(sheet);
   const data = XLSX.utils.sheet_to_json(sheet, {
     header: 1,
     defval: "",
@@ -3857,6 +3892,7 @@ export function parseGenericPivotFormat(
 
   const workbook = XLSX.read(buffer, { type: "buffer" });
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  fixSheetRange(sheet);
   const data = XLSX.utils.sheet_to_json(sheet, {
     header: 1,
     defval: "",
@@ -4090,6 +4126,7 @@ export function parseGRNInvoiceFormat(
 
   const workbook = XLSX.read(buffer, { type: "buffer" });
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  fixSheetRange(sheet);
   const rawData = XLSX.utils.sheet_to_json(sheet, {
     header: 1,
     defval: "",
@@ -4276,6 +4313,7 @@ export function parsePRDateHeaderFormat(
 
   const workbook = XLSX.read(buffer, { type: "buffer" });
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  fixSheetRange(sheet);
   const data = XLSX.utils.sheet_to_json(sheet, {
     header: 1,
     defval: "",
@@ -4493,6 +4531,7 @@ export function parseStoreMultibrandFormat(
 
   const workbook = XLSX.read(buffer, { type: "buffer" });
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  fixSheetRange(sheet);
   const data = XLSX.utils.sheet_to_json(sheet, {
     header: 1,
     defval: "",
@@ -4693,6 +4732,7 @@ function parseTarikEdizFormat(
   const workbook = XLSX.read(buffer, { type: "buffer" });
   const sheetName = workbook.SheetNames[0];
   const sheet = workbook.Sheets[sheetName];
+  fixSheetRange(sheet);
   const data = XLSX.utils.sheet_to_json(sheet, {
     header: 1,
     raw: false,
@@ -4846,6 +4886,7 @@ function parseJovaniFormat(
   const workbook = XLSX.read(buffer, { type: "buffer" });
   const sheetName = workbook.SheetNames[0];
   const sheet = workbook.Sheets[sheetName];
+  fixSheetRange(sheet);
   const data = XLSX.utils.sheet_to_json(sheet, {
     header: 1,
     raw: false,
@@ -5082,6 +5123,7 @@ function parseSherriHillFormat(
   const workbook = XLSX.read(buffer, { type: "buffer" });
   const sheetName = workbook.SheetNames[0];
   const sheet = workbook.Sheets[sheetName];
+  fixSheetRange(sheet);
   const data = XLSX.utils.sheet_to_json(sheet, {
     header: 1,
     defval: "",
@@ -5248,6 +5290,7 @@ function parseFerianiGiaFormat(
   const workbook = XLSX.read(buffer, { type: "buffer" });
   const sheetName = workbook.SheetNames[0];
   const sheet = workbook.Sheets[sheetName];
+  fixSheetRange(sheet);
   const data = XLSX.utils.sheet_to_json(sheet, {
     header: 1,
     defval: "",

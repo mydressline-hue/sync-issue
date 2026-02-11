@@ -20,6 +20,7 @@ import { storage } from "./storage";
 import {
   autoDetectPivotFormat,
   parseIntelligentPivotFormat,
+  fixSheetRange,
   type UniversalParserConfig,
 } from "./aiImportRoutes";
 import {
@@ -401,6 +402,7 @@ export async function executeImport(
       for (const file of fileBuffers) {
         const wb = XLSX.read(file.buffer, { type: "buffer" });
         const sheet = wb.Sheets[wb.SheetNames[0]];
+        fixSheetRange(sheet);
         const data = XLSX.utils.sheet_to_json(sheet, {
           header: 1,
           defval: "",
@@ -417,6 +419,7 @@ export async function executeImport(
     } else {
       const workbook = XLSX.read(primaryFile.buffer, { type: "buffer" });
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      fixSheetRange(sheet);
       rawData = XLSX.utils.sheet_to_json(sheet, {
         header: 1,
         defval: "",

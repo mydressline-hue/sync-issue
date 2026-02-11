@@ -426,6 +426,47 @@ export function autoDetectPivotFormat(
 }
 
 // ============================================================
+// FIX DIRTY EXCEL SHEET RANGE
+// Some Excel files have !ref extending to XFD (col 16384) even though
+// only a few columns have data. sheet_to_json on such sheets creates
+// millions of empty cells and crashes the process.
+// This scans row 1 (and optionally row 2) to find the actual last column
+// with data and rewrites !ref to trim the range.
+// ============================================================
+export function fixSheetRange(sheet: XLSX.WorkSheet): void {
+  const ref = sheet["!ref"];
+  if (!ref) return;
+
+  // Parse the range
+  const range = XLSX.utils.decode_range(ref);
+  // Only fix if the column range is suspiciously wide (> 100 columns)
+  if (range.e.c <= 100) return;
+
+  // Scan first few rows to find the actual last column with data
+  let maxCol = 0;
+  const rowsToCheck = Math.min(range.e.r, 10); // Check up to 10 rows
+  for (let r = range.s.r; r <= rowsToCheck; r++) {
+    for (let c = range.e.c; c >= maxCol; c--) {
+      const addr = XLSX.utils.encode_cell({ r, c });
+      const cell = sheet[addr];
+      if (cell && cell.v !== undefined && cell.v !== null && cell.v !== "") {
+        if (c > maxCol) maxCol = c;
+        break; // Found rightmost in this row, move to next row
+      }
+    }
+  }
+
+  // Add a small buffer (2 extra columns) for safety
+  const newLastCol = maxCol + 2;
+  if (newLastCol < range.e.c) {
+    const trimmed = range.e.c - newLastCol;
+    range.e.c = newLastCol;
+    sheet["!ref"] = XLSX.utils.encode_range(range);
+    console.log(`[FixRange] Trimmed sheet range from ${trimmed + newLastCol + 1} to ${newLastCol + 1} columns`);
+  }
+}
+
+// ============================================================
 // INTELLIGENT PIVOT FORMAT PARSER
 // ============================================================
 
@@ -441,6 +482,7 @@ export function parseIntelligentPivotFormat(
     ? XLSX.read(fs.readFileSync(bufferOrPath), { type: "buffer", ...(options?.sheetRows ? { sheetRows: options.sheetRows } : {}) })
     : XLSX.read(bufferOrPath, { type: "buffer", ...(options?.sheetRows ? { sheetRows: options.sheetRows } : {}) });
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  fixSheetRange(sheet); // Fix dirty Excel files with range extending to col XFD
   const rawData = XLSX.utils.sheet_to_json(sheet, {
     header: 1,
     defval: "",
@@ -1656,6 +1698,7 @@ router.post("/analyze", upload.any(), async (req: Request, res: Response) => {
         // Read from disk path, not buffer — only first 30 rows for analysis
         const wb = XLSX.read(fs.readFileSync(file.path), { type: "buffer", sheetRows: 30 });
         const sheet = wb.Sheets[wb.SheetNames[0]];
+        fixSheetRange(sheet);
         const data = XLSX.utils.sheet_to_json(sheet, {
           header: 1,
           defval: "",
@@ -1676,6 +1719,7 @@ router.post("/analyze", upload.any(), async (req: Request, res: Response) => {
       // Read directly from disk with sheetRows limit — never loads full file into memory
       const workbook = XLSX.read(fs.readFileSync(primaryFile.path), { type: "buffer", sheetRows: 30 });
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      fixSheetRange(sheet);
       rawData = XLSX.utils.sheet_to_json(sheet, {
         header: 1,
         defval: "",
@@ -1950,6 +1994,7 @@ router.post(
       {
         const detectWb = XLSX.read(fs.readFileSync(req.file.path), { type: "buffer", sheetRows: 10 });
         const detectSheet = detectWb.Sheets[detectWb.SheetNames[0]];
+        fixSheetRange(detectSheet);
         const sampleData = XLSX.utils.sheet_to_json(detectSheet, {
           header: 1,
           defval: "",
@@ -1977,6 +2022,7 @@ router.post(
         {
           const fullWb = XLSX.read(fs.readFileSync(req.file.path), { type: "buffer", sheetRows: 500 });
           const fullSheet = fullWb.Sheets[fullWb.SheetNames[0]];
+          fixSheetRange(fullSheet);
           const rawData = XLSX.utils.sheet_to_json(fullSheet, {
             header: 1,
             defval: "",
@@ -2177,6 +2223,7 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
         // Limit rows per file during setup
         const wb = XLSX.read(fs.readFileSync(file.path), { type: "buffer", sheetRows: SETUP_ROW_LIMIT });
         const sheet = wb.Sheets[wb.SheetNames[0]];
+        fixSheetRange(sheet);
         const data = XLSX.utils.sheet_to_json(sheet, {
           header: 1,
           defval: "",
@@ -2210,6 +2257,7 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
       {
         const sampleWb = XLSX.read(fs.readFileSync(primaryFile.path), { type: "buffer", sheetRows: 10 });
         const sampleSheet = sampleWb.Sheets[sampleWb.SheetNames[0]];
+        fixSheetRange(sampleSheet);
         rawData = XLSX.utils.sheet_to_json(sampleSheet, {
           header: 1,
           defval: "",
@@ -2242,6 +2290,7 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
         {
           const fullWb = XLSX.read(fs.readFileSync(consolidatedFilePath), { type: "buffer", sheetRows: SETUP_ROW_LIMIT });
           const fullSheet = fullWb.Sheets[fullWb.SheetNames[0]];
+          fixSheetRange(fullSheet);
           rawData = XLSX.utils.sheet_to_json(fullSheet, { header: 1, defval: "" }) as any[][];
         }
         // fullWb/fullSheet now out of scope

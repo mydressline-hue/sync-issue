@@ -56,6 +56,7 @@ import { registerVendorImportRoutes } from "./vendorImportRoutes";
 import aiImportRoutes, {
   autoDetectPivotFormat,
   parseIntelligentPivotFormat,
+  fixSheetRange,
   UniversalParserConfig,
 } from "./aiImportRoutes";
 import {
@@ -416,6 +417,7 @@ function parseTarikEdizFormat(
   const workbook = XLSX.read(buffer, { type: "buffer" });
   const sheetName = workbook.SheetNames[0];
   const sheet = workbook.Sheets[sheetName];
+  fixSheetRange(sheet);
   const data = XLSX.utils.sheet_to_json(sheet, {
     header: 1,
     raw: false,
@@ -567,6 +569,7 @@ function parseJovaniFormat(
   const workbook = XLSX.read(buffer, { type: "buffer" });
   const sheetName = workbook.SheetNames[0];
   const sheet = workbook.Sheets[sheetName];
+  fixSheetRange(sheet);
   const data = XLSX.utils.sheet_to_json(sheet, {
     header: 1,
     raw: false,
@@ -803,6 +806,7 @@ function parseSherriHillFormat(
   const workbook = XLSX.read(buffer, { type: "buffer" });
   const sheetName = workbook.SheetNames[0];
   const sheet = workbook.Sheets[sheetName];
+  fixSheetRange(sheet);
   const data = XLSX.utils.sheet_to_json(sheet, {
     header: 1,
     defval: "",
@@ -970,6 +974,7 @@ function parseGenericPivotedFormat(
   const workbook = XLSX.read(buffer, { type: "buffer" });
   const sheetName = workbook.SheetNames[0];
   const sheet = workbook.Sheets[sheetName];
+  fixSheetRange(sheet);
   const data = XLSX.utils.sheet_to_json(sheet, {
     header: 1,
     raw: false,
@@ -1233,6 +1238,7 @@ function parseExcelToInventory(
     const workbook = XLSX.read(buffer, { type: "buffer" });
     const sheetName = workbook.SheetNames[0];
     const sheet = workbook.Sheets[sheetName];
+    fixSheetRange(sheet);
     rawData = XLSX.utils.sheet_to_json(sheet, {
       header: 1,
       raw: false,
@@ -3212,6 +3218,7 @@ export async function registerRoutes(
         {
           const detectWorkbook = XLSX.read(fs.readFileSync(file.path), { type: "buffer", sheetRows: 10 });
           const detectSheet = detectWorkbook.Sheets[detectWorkbook.SheetNames[0]];
+          fixSheetRange(detectSheet);
           const sampleData = XLSX.utils.sheet_to_json(detectSheet, {
             header: 1,
             defval: "",
@@ -4868,6 +4875,7 @@ export async function registerRoutes(
         const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
         const sheetName = workbook.SheetNames[0];
         const worksheet = workbook.Sheets[sheetName];
+        fixSheetRange(worksheet);
         const data = XLSX.utils.sheet_to_json(worksheet, {
           header: 1,
         }) as any[][];
@@ -11084,6 +11092,7 @@ export async function registerRoutes(
         const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
         const sheetName = workbook.SheetNames[0];
         const worksheet = workbook.Sheets[sheetName];
+        fixSheetRange(worksheet);
         const rows: any[] = XLSX.utils.sheet_to_json(worksheet, {
           header: 1,
           defval: "",
@@ -12628,6 +12637,7 @@ export async function registerRoutes(
         const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
         const sheetName = workbook.SheetNames[0];
         const worksheet = workbook.Sheets[sheetName];
+        fixSheetRange(worksheet);
         const jsonData = XLSX.utils.sheet_to_json(worksheet, {
           header: 1,
           defval: "",
@@ -14538,6 +14548,7 @@ export async function registerRoutes(
         const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
         const sheetName = workbook.SheetNames[0];
         const worksheet = workbook.Sheets[sheetName];
+        fixSheetRange(worksheet);
         const jsonData = XLSX.utils.sheet_to_json(worksheet, {
           header: 1,
           defval: "",
@@ -20082,6 +20093,7 @@ function parseFerianiGiaFormat(
   const workbook = XLSX.read(buffer, { type: "buffer" });
   const sheetName = workbook.SheetNames[0];
   const sheet = workbook.Sheets[sheetName];
+  fixSheetRange(sheet);
   const data = XLSX.utils.sheet_to_json(sheet, {
     header: 1,
     defval: "",
