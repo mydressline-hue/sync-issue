@@ -1,230 +1,305 @@
-/**
- * Size limit utilities for filtering inventory items by size range.
- * Used by applyVariantRules() and applyPriceBasedExpansion() to enforce
- * per-data-source size constraints, including prefix-based overrides.
- */
+// Size utility functions for sorting and ranking sizes
+// Extracted to avoid circular dependencies between routes.ts and shopify.ts
 
-export interface SizeLimitConfig {
-  enabled?: boolean;
-  minSize?: string | null;
-  maxSize?: string | null;
-  minLetterSize?: string | null;
-  maxLetterSize?: string | null;
-  prefixOverrides?: Array<{
-    pattern: string;
-    minSize?: string | null;
-    maxSize?: string | null;
-    minLetterSize?: string | null;
-    maxLetterSize?: string | null;
-  }>;
-}
+// Letter size sequence for expansion (common clothing sizes)
+export const LETTER_SIZES = ['XXS', 'XS', 'S', 'M', 'L', 'XL', '2XL', '3XL', '4XL', '5XL'];
 
-// Letter sizes in ascending order
-export const LETTER_SIZES = [
-  "XXS",
-  "XS",
-  "S",
-  "M",
-  "L",
-  "XL",
-  "2XL",
-  "3XL",
-  "4XL",
-  "5XL",
-];
-
-// Letter size → index map (includes common aliases)
+// Map for case-insensitive lookup - store uppercase versions
 export const LETTER_SIZE_MAP: Record<string, number> = {
-  XXS: 0,
-  XS: 1,
-  S: 2,
-  M: 3,
-  L: 4,
-  XL: 5,
-  "2XL": 6,
-  "3XL": 7,
-  "4XL": 8,
-  "5XL": 9,
-  // Aliases
-  XXL: 6,
-  XXXL: 7,
-  XXXXL: 8,
-  XXXXXL: 9,
+  // Standard uppercase
+  'XXS': 0, 'XS': 1, 'S': 2, 'M': 3, 'L': 4, 'XL': 5, '2XL': 6, '3XL': 7, '4XL': 8, '5XL': 9,
+  // Common alternatives
+  'XXL': 6, 'XXXL': 7, 'XXXXL': 8, 'XXXXXL': 9,
 };
 
-// Numeric sizes in ascending order
+// Numeric size sequence for expansion (common dress sizes - step of 2)
+// Includes 000, 00 before 0 for proper ordering
+// W (plus) sizes immediately follow their base size for proper ordering
+// To include W sizes, explicitly select them as min/max (e.g., max=24W includes 24W, max=24 excludes 24W)
 export const NUMERIC_SIZES = [
-  "000",
-  "00",
-  "0",
-  "2",
-  "4",
-  "6",
-  "8",
-  "10",
-  "12",
-  "14",
-  "16",
-  "18",
-  "20",
-  "22",
-  "24",
-  "26",
-  "28",
-  "30",
-  "32",
-  "34",
-  "36",
+  '000', '00', '0', '2', '4', '6', '8', '10', '12', '14',
+  '16', '16W',
+  '18', '18W',
+  '20', '20W',
+  '22', '22W',
+  '24', '24W',
+  '26', '26W',
+  '28', '28W',
+  '30', '30W',
+  '32', '32W',
+  '34', '34W',
+  '36', '36W'
 ];
 
-// Numeric size → index map (built from NUMERIC_SIZES)
+// Map for numeric size lookup - preserves original size format
 export const NUMERIC_SIZE_MAP: Record<string, number> = {};
 NUMERIC_SIZES.forEach((size, index) => {
   NUMERIC_SIZE_MAP[size] = index;
 });
 
-/**
- * Get the ordinal rank of a size string for sorting purposes.
- * Returns -1 for unrecognized sizes.
- */
+// Helper function to get size rank for sorting (smallest to largest)
+// Returns a number where lower = smaller size, higher = larger size
 export function getSizeRank(size: string): number {
-  const normalized = String(size || "")
-    .trim()
-    .toUpperCase();
+  if (!size) return 99999;
 
-  // Check letter sizes
-  if (LETTER_SIZE_MAP[normalized] !== undefined) {
-    // Offset letter sizes to separate them from numeric (100+)
-    return 100 + LETTER_SIZE_MAP[normalized];
+  const normalized = String(size).trim();
+  const upper = normalized.toUpperCase();
+
+  // Check letter sizes first (XXS=0, XS=1, S=2, M=3, L=4, XL=5, etc.)
+  const letterIndex = LETTER_SIZE_MAP[upper];
+  if (letterIndex !== undefined) {
+    return letterIndex;
   }
 
-  // Check numeric sizes
-  const rawSize = String(size || "").trim();
-  if (NUMERIC_SIZE_MAP[rawSize] !== undefined) {
-    return NUMERIC_SIZE_MAP[rawSize];
+  // Check numeric sizes - these should have higher rank than letter sizes
+  // so they sort separately (or we can offset them to sort after letters)
+  const numericIndex = NUMERIC_SIZE_MAP[normalized];
+  if (numericIndex !== undefined) {
+    return 100 + numericIndex; // Offset to separate from letter sizes
   }
 
-  // Check W (plus) sizes — strip the W suffix and use numeric rank + 50 offset
-  const wMatch = rawSize.match(/^(\d+)W$/i);
-  if (wMatch && NUMERIC_SIZE_MAP[wMatch[1]] !== undefined) {
-    return 50 + NUMERIC_SIZE_MAP[wMatch[1]];
+  // Try parsing as number for unknown numeric sizes
+  const num = parseInt(normalized);
+  if (!isNaN(num)) {
+    // For numeric sizes, position them in order
+    // 0 -> 102, 2 -> 103, 4 -> 104, etc.
+    return 100 + 2 + (num / 2);
   }
 
-  return -1;
+  // Unknown size - put at end
+  return 99998;
 }
 
-/**
- * Check if a size is allowed given the size limit configuration and item style.
- *
- * Logic:
- * 1. If config is not enabled, allow everything.
- * 2. Check prefix overrides — if a style matches an override pattern, that
- *    override's limits replace the defaults (only for fields the override specifies).
- * 3. If no effective limits are set at all, allow everything.
- * 4. For recognized sizes (letter or numeric), check against the effective min/max.
- * 5. For unrecognized sizes (DOZEN, UNIT, SS, etc.), FILTER THEM OUT when any
- *    limits are active — the user explicitly constrained what sizes are valid.
- */
+// Size limit configuration type
+export interface SizeLimitConfig {
+  enabled?: boolean;
+  minSize?: string;        // Min numeric size (0, 2, 4...)
+  maxSize?: string;        // Max numeric size (0, 2, 4...)
+  minLetterSize?: string;  // Min letter size (S, M, L...)
+  maxLetterSize?: string;  // Max letter size (S, M, L...)
+  allowedSizes?: string[];
+  prefixOverrides?: Array<{
+    pattern: string;
+    minSize?: string;
+    maxSize?: string;
+    minLetterSize?: string;
+    maxLetterSize?: string;
+    allowedSizes?: string[];
+  }>;
+}
+
+// Helper to check if a size is a letter size
+function isLetterSize(size: string): boolean {
+  const upper = size.toUpperCase();
+  return LETTER_SIZE_MAP[upper] !== undefined;
+}
+
+// Helper to check if a size is a W (plus) size
+function isWSize(size: string): boolean {
+  return size.toUpperCase().endsWith('W');
+}
+
+// Check if a size is within the allowed range
+// Returns true if size is allowed, false if it should be filtered out
 export function isSizeAllowed(
   size: string,
-  config: SizeLimitConfig,
-  style: string,
+  sizeLimitConfig: SizeLimitConfig | null | undefined,
+  style?: string
 ): boolean {
-  if (!config?.enabled) return true;
-
-  // Resolve effective limits (start with defaults, apply prefix overrides)
-  let effectiveMinSize = config.minSize;
-  let effectiveMaxSize = config.maxSize;
-  let effectiveMinLetter = config.minLetterSize;
-  let effectiveMaxLetter = config.maxLetterSize;
-
-  if (config.prefixOverrides?.length && style) {
-    for (const override of config.prefixOverrides) {
-      if (!override.pattern) continue;
-      let matches = false;
-      try {
-        matches = new RegExp(override.pattern, "i").test(style);
-      } catch {
-        matches = style
-          .toLowerCase()
-          .startsWith(override.pattern.toLowerCase());
-      }
-      if (matches) {
-        // Override only the fields that the override explicitly provides
-        if (override.minSize !== undefined && override.minSize !== null)
-          effectiveMinSize = override.minSize;
-        if (override.maxSize !== undefined && override.maxSize !== null)
-          effectiveMaxSize = override.maxSize;
-        if (
-          override.minLetterSize !== undefined &&
-          override.minLetterSize !== null
-        )
-          effectiveMinLetter = override.minLetterSize;
-        if (
-          override.maxLetterSize !== undefined &&
-          override.maxLetterSize !== null
-        )
-          effectiveMaxLetter = override.maxLetterSize;
-        break;
-      }
-    }
-  }
-
-  // If no limits are set at all (enabled but nothing configured), allow everything
-  const hasNumericLimits = effectiveMinSize || effectiveMaxSize;
-  const hasLetterLimits = effectiveMinLetter || effectiveMaxLetter;
-  if (!hasNumericLimits && !hasLetterLimits) return true;
-
-  const normalizedSize = String(size || "")
-    .trim()
-    .toUpperCase();
-  if (!normalizedSize) return false;
-
-  // --- Letter size check ---
-  if (LETTER_SIZE_MAP[normalizedSize] !== undefined) {
-    // It's a recognized letter size
-    if (!hasLetterLimits) {
-      // No letter limits configured — allow letter sizes through
-      return true;
-    }
-    const idx = LETTER_SIZE_MAP[normalizedSize];
-    if (effectiveMinLetter) {
-      const minIdx = LETTER_SIZE_MAP[effectiveMinLetter.toUpperCase()];
-      if (minIdx !== undefined && idx < minIdx) return false;
-    }
-    if (effectiveMaxLetter) {
-      const maxIdx = LETTER_SIZE_MAP[effectiveMaxLetter.toUpperCase()];
-      if (maxIdx !== undefined && idx > maxIdx) return false;
-    }
+  // If no config or not enabled, allow all sizes
+  if (!sizeLimitConfig?.enabled) {
     return true;
   }
 
-  // --- Numeric size check (including W sizes) ---
-  const rawSize = String(size || "").trim();
-  const wMatch = rawSize.match(/^(\d+)W$/i);
-  const numericPart = wMatch ? wMatch[1] : rawSize;
-
-  if (NUMERIC_SIZE_MAP[numericPart] !== undefined) {
-    // It's a recognized numeric size
-    if (!hasNumericLimits) {
-      // No numeric limits configured — allow numeric sizes through
-      return true;
-    }
-    const idx = NUMERIC_SIZE_MAP[numericPart];
-    if (effectiveMinSize) {
-      const minStr = String(effectiveMinSize).replace(/W$/i, "");
-      const minIdx = NUMERIC_SIZE_MAP[minStr];
-      if (minIdx !== undefined && idx < minIdx) return false;
-    }
-    if (effectiveMaxSize) {
-      const maxStr = String(effectiveMaxSize).replace(/W$/i, "");
-      const maxIdx = NUMERIC_SIZE_MAP[maxStr];
-      if (maxIdx !== undefined && idx > maxIdx) return false;
-    }
-    return true;
+  const normalizedSize = String(size || '').trim();
+  if (!normalizedSize) {
+    return false; // Empty sizes are never allowed
   }
 
-  // --- Unrecognized size (DOZEN, DOZN, SS, SM, MD, LG, LLL, LL, UNIT, etc.) ---
-  // When size limits are active, filter out sizes that don't match any known category
-  return false;
+  // Find applicable size limits (check prefix overrides first)
+  let minSize = sizeLimitConfig.minSize;
+  let maxSize = sizeLimitConfig.maxSize;
+  let minLetterSize = sizeLimitConfig.minLetterSize;
+  let maxLetterSize = sizeLimitConfig.maxLetterSize;
+  let allowedSizes = sizeLimitConfig.allowedSizes;
+
+  // Check for prefix-specific overrides
+  if (style && sizeLimitConfig.prefixOverrides?.length) {
+    for (const override of sizeLimitConfig.prefixOverrides) {
+      if (override.pattern) {
+        try {
+          const regex = new RegExp(override.pattern, 'i');
+          if (regex.test(style)) {
+            // Use override settings
+            minSize = override.minSize ?? minSize;
+            maxSize = override.maxSize ?? maxSize;
+            minLetterSize = override.minLetterSize ?? minLetterSize;
+            maxLetterSize = override.maxLetterSize ?? maxLetterSize;
+            allowedSizes = override.allowedSizes ?? allowedSizes;
+            break;
+          }
+        } catch (e) {
+          // Invalid regex, try literal match
+          if (style.toLowerCase().startsWith(override.pattern.toLowerCase())) {
+            minSize = override.minSize ?? minSize;
+            maxSize = override.maxSize ?? maxSize;
+            minLetterSize = override.minLetterSize ?? minLetterSize;
+            maxLetterSize = override.maxLetterSize ?? maxLetterSize;
+            allowedSizes = override.allowedSizes ?? allowedSizes;
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  // If explicit allowedSizes list is provided, check against it
+  if (allowedSizes && allowedSizes.length > 0) {
+    const normalizedUpper = normalizedSize.toUpperCase();
+    return allowedSizes.some(s =>
+      s.toUpperCase() === normalizedUpper || s === normalizedSize
+    );
+  }
+
+  // Determine if this is a letter size or numeric size
+  const isLetter = isLetterSize(normalizedSize);
+
+  if (isLetter) {
+    // Check against letter size limits (if configured)
+    if (minLetterSize || maxLetterSize) {
+      const sizeRank = getSizeRank(normalizedSize);
+
+      if (minLetterSize) {
+        const minRank = getSizeRank(minLetterSize);
+        if (sizeRank < minRank) {
+          return false;
+        }
+      }
+
+      if (maxLetterSize) {
+        const maxRank = getSizeRank(maxLetterSize);
+        if (sizeRank > maxRank) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    // If numeric limits ARE set but no letter limits, BLOCK letter sizes
+    // (user specified a numeric range like 00-24, so they don't want S, M, L, etc.)
+    if (minSize || maxSize) {
+      return false;
+    }
+
+    // If no limits at all, allow everything
+    return true;
+  } else {
+    // Check against numeric size limits (if configured)
+    if (minSize || maxSize) {
+      const sizeIsW = isWSize(normalizedSize);
+      const minIsW = minSize ? isWSize(minSize) : null;
+      const maxIsW = maxSize ? isWSize(maxSize) : null;
+
+      // W sizes and regular sizes are separate tracks:
+      // Determine if W sizes are allowed based on the configured limits
+      // W sizes are only allowed if at least one limit is a W size
+      const wSizesAllowed = (minIsW === true) || (maxIsW === true);
+
+      if (sizeIsW && !wSizesAllowed) {
+        return false; // W size not allowed when both min and max are non-W
+      }
+
+      const sizeRank = getSizeRank(normalizedSize);
+
+      if (minSize) {
+        const minRank = getSizeRank(minSize);
+        if (sizeRank < minRank) {
+          return false;
+        }
+      }
+
+      if (maxSize) {
+        const maxRank = getSizeRank(maxSize);
+        if (sizeRank > maxRank) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    // If letter limits ARE set but no numeric limits, BLOCK numeric sizes
+    // (user specified a letter range like S-XL, so they don't want 0, 2, 4, etc.)
+    if (minLetterSize || maxLetterSize) {
+      return false;
+    }
+
+    // If no limits at all, allow everything
+    return true;
+  }
+}
+
+// Get the effective size limits for a given style (resolves prefix overrides)
+export function getEffectiveSizeLimits(
+  sizeLimitConfig: SizeLimitConfig | null | undefined,
+  style?: string
+): { minSize?: string; maxSize?: string; minLetterSize?: string; maxLetterSize?: string; allowedSizes?: string[] } | null {
+  if (!sizeLimitConfig?.enabled) {
+    return null;
+  }
+
+  let minSize = sizeLimitConfig.minSize;
+  let maxSize = sizeLimitConfig.maxSize;
+  let minLetterSize = sizeLimitConfig.minLetterSize;
+  let maxLetterSize = sizeLimitConfig.maxLetterSize;
+  let allowedSizes = sizeLimitConfig.allowedSizes;
+
+  // Check for prefix-specific overrides
+  if (style && sizeLimitConfig.prefixOverrides?.length) {
+    for (const override of sizeLimitConfig.prefixOverrides) {
+      if (override.pattern) {
+        try {
+          const regex = new RegExp(override.pattern, 'i');
+          if (regex.test(style)) {
+            minSize = override.minSize ?? minSize;
+            maxSize = override.maxSize ?? maxSize;
+            minLetterSize = override.minLetterSize ?? minLetterSize;
+            maxLetterSize = override.maxLetterSize ?? maxLetterSize;
+            allowedSizes = override.allowedSizes ?? allowedSizes;
+            break;
+          }
+        } catch (e) {
+          if (style.toLowerCase().startsWith(override.pattern.toLowerCase())) {
+            minSize = override.minSize ?? minSize;
+            maxSize = override.maxSize ?? maxSize;
+            minLetterSize = override.minLetterSize ?? minLetterSize;
+            maxLetterSize = override.maxLetterSize ?? maxLetterSize;
+            allowedSizes = override.allowedSizes ?? allowedSizes;
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  return { minSize, maxSize, minLetterSize, maxLetterSize, allowedSizes };
+}
+
+// Generate list of allowed sizes between min and max
+export function generateAllowedSizeRange(minSize?: string, maxSize?: string): string[] {
+  if (!minSize && !maxSize) {
+    return [];
+  }
+
+  const minRank = minSize ? getSizeRank(minSize) : 0;
+  const maxRank = maxSize ? getSizeRank(maxSize) : 99999;
+
+  // Determine if we're dealing with letter or numeric sizes
+  const isLetterRange = minSize && LETTER_SIZE_MAP[minSize.toUpperCase()] !== undefined;
+  const sizeList = isLetterRange ? LETTER_SIZES : NUMERIC_SIZES;
+  const offset = isLetterRange ? 0 : 100;
+
+  return sizeList.filter(size => {
+    const rank = getSizeRank(size);
+    return rank >= minRank && rank <= maxRank;
+  });
 }
