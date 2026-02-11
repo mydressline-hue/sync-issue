@@ -304,13 +304,15 @@ export function autoDetectPivotFormat(
   )
     return "feriani";
 
-  // PR Date Headers
-  const dateHeaders = headers.filter((h: string) => /^4\d{4}$/.test(h));
+  // PR Date Headers — detect Excel serial numbers OR human-readable dates (MM/DD/YYYY)
+  const dateHeaders = headers.filter((h: string) =>
+    /^4\d{4}$/.test(h) || /^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(h),
+  );
   if (dateHeaders.length >= 3) return "pr_date_headers";
 
-  // Generic Pivot
+  // Generic Pivot — include leading-zero sizes (02,04,06,08) and extended sizes (32,34,36)
   const sizePattern =
-    /^(000|00|OOO|OO|0|2|4|6|8|10|12|14|16|18|20|22|24|26|28|30)$/i;
+    /^(000|00|OOO|OO|0|02|04|06|08|2|4|6|8|10|12|14|16|18|20|22|24|26|28|30|32|34|36)$/i;
   const sizeColumns = headers.filter((h: string) => sizePattern.test(h));
 
   if (sizeColumns.length >= 5) {
@@ -867,7 +869,7 @@ function parseGenericPivotFormat(
 
   let headerRowIdx = 0;
   const sizePattern =
-    /^(000|00|OOO|OO|0|2|4|6|8|10|12|14|16|18|20|22|24|26|28|30)$/i;
+    /^(000|00|OOO|OO|0|02|04|06|08|2|4|6|8|10|12|14|16|18|20|22|24|26|28|30|32|34|36)$/i;
 
   for (let i = 0; i < Math.min(5, data.length); i++) {
     const row = data[i];
@@ -916,6 +918,8 @@ function parseGenericPivotFormat(
       let normalizedSize = h;
       if (h.toUpperCase() === "OOO") normalizedSize = "000";
       else if (h.toUpperCase() === "OO") normalizedSize = "00";
+      // Normalize leading-zero sizes: "02"→"2", "04"→"4", "06"→"6", "08"→"8"
+      else if (/^0\d$/.test(h)) normalizedSize = h.replace(/^0/, "");
       sizeColumns.push({ index: i, size: normalizedSize });
     }
   }

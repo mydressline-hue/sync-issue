@@ -404,6 +404,7 @@ export async function executeImport(
         const data = XLSX.utils.sheet_to_json(sheet, {
           header: 1,
           defval: "",
+          raw: false, // FIX: Prevent scientific notation corruption (e.g. "1921E0136" → 1.921e+139)
         }) as any[][];
         if (headerRow === null && data.length > 0) {
           headerRow = data[0];
