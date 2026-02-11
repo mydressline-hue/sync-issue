@@ -519,6 +519,11 @@ export function parseIntelligentPivotFormat(
       break;
     case "generic_pivot":
       items = parseGenericPivotFormat(data, config, filename);
+      // If generic_pivot found 0 items, file may actually be row format
+      if (items.length === 0) {
+        console.log(`[IntelligentPivot] generic_pivot returned 0 items, trying row format fallback`);
+        items = parseRowFormat(data, config, filename);
+      }
       break;
     case "pr_date_headers":
       items = parsePRDateHeaderFormat(data, config);
@@ -1601,10 +1606,11 @@ function parseRowFormat(
     "style", "style#", "item", "product_id", "product", "code", "sku",
   ]);
   const colorIdx = resolveColumnIndex(config, headersLower, "color", [
-    "color", "colour", "_color_name", "color_descript",
+    "colordesc", "color_desc", "color_name", "_color_name", "color_descript",
+    "color", "colour",
   ]);
   const sizeIdx = resolveColumnIndex(config, headersLower, "size", [
-    "size", "_size", "sizename",
+    "sizedesc", "size_desc", "sizename", "size_name", "size", "_size",
   ]);
   const stockIdx = resolveColumnIndex(config, headersLower, "stock", [
     "stock", "qty", "quantity", "inventory", "_inventory_level",

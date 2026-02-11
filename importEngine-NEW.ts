@@ -493,6 +493,46 @@ export async function executeImport(
       rows = pivotResult.rows;
       items = pivotResult.items;
 
+      // If pivot parser returned 0 items and auto-detection didn't confirm the format,
+      // the saved formatType may be wrong. Fall back to row-based parsing.
+      if (items.length === 0 && !detectedPivotFormat) {
+        console.log(`${logPrefix} Pivot parser returned 0 items and auto-detection didn't confirm format — falling back to row parser`);
+        if (source === "ai_import") {
+          const { parseWithEnhancedConfig } = await import("./enhancedImportProcessor");
+          const parseResult = await parseWithEnhancedConfig(
+            primaryFile.buffer,
+            {
+              formatType: "row",
+              columnMapping: dsConfig.columnMapping,
+              pivotConfig: dsConfig.pivotConfig,
+              discontinuedConfig: dsConfig.discontinuedConfig,
+              futureStockConfig: dsConfig.futureStockConfig,
+              stockValueConfig: dsConfig.stockValueConfig,
+              cleaningConfig,
+            },
+            dataSourceId,
+          );
+          if (parseResult.success && parseResult.items.length > 0) {
+            items = parseResult.items;
+            rows = rawData;
+            console.log(`${logPrefix} Row parser fallback found ${items.length} items`);
+          }
+        } else {
+          const { parseExcelToInventory } = await import("./importUtils");
+          const result = (parseExcelToInventory as any)(
+            consolidatedBuffer,
+            dsConfig.columnMapping,
+            cleaningConfig,
+          );
+          if (result.items?.length > 0) {
+            headers = result.headers;
+            rows = result.rows;
+            items = result.items;
+            console.log(`${logPrefix} Row parser fallback found ${items.length} items`);
+          }
+        }
+      }
+
       // Save detected format for future imports
       if (detectedPivotFormat) {
         await storage.updateDataSource(dataSourceId, {
