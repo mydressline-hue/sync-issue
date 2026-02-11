@@ -2161,6 +2161,7 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
     // Consolidate multiple files if in multi-file mode
     let rawData: any[][] = [];
     const primaryFile = files[0];
+    let consolidatedFilePath: string = primaryFile.path;
 
     if (files.length > 1 && req.body.multiFileMode === "true") {
       console.log(
@@ -2169,7 +2170,7 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
       let headerRow: any[] | null = null;
 
       for (const file of files) {
-        const wb = XLSX.read(file.buffer, { type: "buffer" });
+        const wb = XLSX.read(fs.readFileSync(file.path), { type: "buffer" });
         const sheet = wb.Sheets[wb.SheetNames[0]];
         const data = XLSX.utils.sheet_to_json(sheet, {
           header: 1,
@@ -2187,31 +2188,24 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
       console.log(
         `[AIImport] Consolidated ${rawData.length} total rows from ${files.length} files`,
       );
-    } else {
-      const workbook = XLSX.read(primaryFile.buffer, { type: "buffer" });
-      const sheet = workbook.Sheets[workbook.SheetNames[0]];
-      rawData = XLSX.utils.sheet_to_json(sheet, {
-        header: 1,
-        defval: "",
-      }) as any[][];
-    }
 
-    // CRITICAL FIX: For multi-file mode, create a consolidated buffer for pivot parsing
-    // This ensures ALL files' data is parsed, not just the first file
-    let consolidatedBuffer: Buffer;
-    if (files.length > 1 && req.body.multiFileMode === "true") {
-      // Create a new workbook from consolidated rawData
+      // Write consolidated data to a temp file so parsers can read from disk
       const newWorkbook = XLSX.utils.book_new();
       const newSheet = XLSX.utils.aoa_to_sheet(rawData);
       XLSX.utils.book_append_sheet(newWorkbook, newSheet, "Consolidated");
-      consolidatedBuffer = Buffer.from(
-        XLSX.write(newWorkbook, { type: "buffer", bookType: "xlsx" }),
-      );
+      consolidatedFilePath = path.join(os.tmpdir(), `consolidated-${Date.now()}.xlsx`);
+      fs.writeFileSync(consolidatedFilePath, Buffer.from(XLSX.write(newWorkbook, { type: "buffer", bookType: "xlsx" })));
       console.log(
-        `[AIImport] Created consolidated buffer (${consolidatedBuffer.length} bytes) from ${rawData.length} rows`,
+        `[AIImport] Wrote consolidated file to ${consolidatedFilePath}`,
       );
     } else {
-      consolidatedBuffer = primaryFile.buffer;
+      // Single file — read only first 10 rows for detection, keep file on disk
+      const sampleWb = XLSX.read(fs.readFileSync(primaryFile.path), { type: "buffer", sheetRows: 10 });
+      const sampleSheet = sampleWb.Sheets[sampleWb.SheetNames[0]];
+      rawData = XLSX.utils.sheet_to_json(sampleSheet, {
+        header: 1,
+        defval: "",
+      }) as any[][];
     }
 
     const detectedPivotFormat = autoDetectPivotFormat(
@@ -2227,7 +2221,13 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
     let parseResult: any;
 
     if (config.formatType === "pivot_grouped" && (overrideConfig?.groupedPivotConfig || (dataSource as any).groupedPivotConfig)) {
-      // Grouped pivot format — use universal parser extractor
+      // Grouped pivot format — read full data from disk
+      if (rawData.length <= 10) {
+        // We only loaded sample, need full data for grouped pivot
+        const fullWb = XLSX.read(fs.readFileSync(consolidatedFilePath), { type: "buffer" });
+        const fullSheet = fullWb.Sheets[fullWb.SheetNames[0]];
+        rawData = XLSX.utils.sheet_to_json(fullSheet, { header: 1, defval: "" }) as any[][];
+      }
       const gpConfig = overrideConfig?.groupedPivotConfig || (dataSource as any).groupedPivotConfig;
       console.log(`[AIImport Execute] Using grouped pivot parser`);
       const groupedResult = parseGroupedPivotData(rawData, gpConfig);
@@ -2253,9 +2253,9 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
         columnMapping: config.columnMapping,
       };
 
-      // Use consolidated buffer (contains ALL files' data in multi-file mode)
+      // Read from disk — no buffer in memory
       const pivotResult = parseIntelligentPivotFormat(
-        consolidatedBuffer,
+        consolidatedFilePath,
         actualFormat,
         universalConfig,
         dataSource.name,
@@ -2277,8 +2277,9 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
         warnings: [],
       };
     } else {
+      // Row format — read from disk
       parseResult = await parseWithEnhancedConfig(
-        primaryFile.buffer,
+        fs.readFileSync(primaryFile.path),
         config,
         dataSourceId,
       );
