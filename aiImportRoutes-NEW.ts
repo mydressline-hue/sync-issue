@@ -136,6 +136,35 @@ function excelSerialToDate(serial: number): string {
   return jsDate.toISOString().split("T")[0];
 }
 
+/**
+ * Parse a date value that may be a number, numeric string (Excel serial), or text date.
+ * With raw:false, Excel serial dates arrive as strings like "46065" — must detect and convert.
+ */
+function parseDateValue(dateVal: any): string | undefined {
+  if (!dateVal) return undefined;
+  // Numeric Excel serial (when raw:true)
+  if (typeof dateVal === "number" && dateVal > 40000 && dateVal < 55000) {
+    return excelSerialToDate(dateVal);
+  }
+  if (typeof dateVal === "string") {
+    const trimmed = dateVal.trim();
+    if (!trimmed || trimmed.toLowerCase() === "n/a" || trimmed.toLowerCase() === "tbd") {
+      return undefined;
+    }
+    // String that looks like Excel serial (when raw:false converts number to string)
+    const numVal = Number(trimmed);
+    if (!isNaN(numVal) && numVal > 40000 && numVal < 55000) {
+      return excelSerialToDate(numVal);
+    }
+    // Try parsing as a real date string (e.g. "2/17/2026", "2026-03-15")
+    const parsed = new Date(trimmed);
+    if (!isNaN(parsed.getTime()) && parsed.getFullYear() >= 1900 && parsed.getFullYear() <= 2100) {
+      return parsed.toISOString().split("T")[0];
+    }
+  }
+  return undefined;
+}
+
 function parseStockValue(
   value: any,
   textMappings?:
@@ -841,9 +870,7 @@ function parseSherriHillFormat(
         dateVal !== "&ndash; " &&
         dateVal !== "–"
       ) {
-        if (typeof dateVal === "number" && dateVal > 40000) {
-          shipDate = excelSerialToDate(dateVal);
-        }
+        shipDate = parseDateValue(dateVal);
       }
 
       if (stock > 0 || (shipDate && isValidShipDate(shipDate))) {
@@ -945,19 +972,7 @@ function parseGenericPivotFormat(
 
     let shipDate: string | undefined;
     if (dateIdx >= 0) {
-      const dateVal = row[dateIdx];
-      if (dateVal && typeof dateVal === "number" && dateVal > 40000) {
-        shipDate = excelSerialToDate(dateVal);
-      } else if (dateVal && typeof dateVal === "string") {
-        // FIX: Handle text dates (e.g., "2025-03-15", "3/15/2025", "Mar 15, 2025")
-        const dateStr = dateVal.trim();
-        if (dateStr && dateStr.toLowerCase() !== "n/a" && dateStr.toLowerCase() !== "tbd") {
-          const parsed = new Date(dateStr);
-          if (!isNaN(parsed.getTime())) {
-            shipDate = parsed.toISOString().split("T")[0];
-          }
-        }
-      }
+      shipDate = parseDateValue(row[dateIdx]);
     }
 
     let isDiscontinued = isFileDiscontinued;
@@ -1490,12 +1505,7 @@ function parseRowFormat(
 
     let shipDate: string | undefined;
     if (dateIdx >= 0) {
-      const dateVal = row[dateIdx];
-      if (dateVal && typeof dateVal === "number" && dateVal > 40000) {
-        shipDate = excelSerialToDate(dateVal);
-      } else if (dateVal && typeof dateVal === "string" && dateVal.trim()) {
-        shipDate = dateVal.trim();
-      }
+      shipDate = parseDateValue(row[dateIdx]);
     }
 
     let discontinued = false;
