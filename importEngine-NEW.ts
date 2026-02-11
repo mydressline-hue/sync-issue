@@ -494,7 +494,8 @@ export async function executeImport(
       items = pivotResult.items;
 
       // If pivot parser returned 0 items and auto-detection didn't confirm the format,
-      // the saved formatType may be wrong. Fall back to row-based parsing.
+      // the saved formatType is wrong for this file. Fall back to row-based parsing
+      // and correct the saved format so future imports don't repeat this.
       if (items.length === 0 && !detectedPivotFormat) {
         console.log(`${logPrefix} Pivot parser returned 0 items and auto-detection didn't confirm format — falling back to row parser`);
         if (source === "ai_import") {
@@ -515,7 +516,11 @@ export async function executeImport(
           if (parseResult.success && parseResult.items.length > 0) {
             items = parseResult.items;
             rows = rawData;
-            console.log(`${logPrefix} Row parser fallback found ${items.length} items`);
+            console.log(`${logPrefix} Row parser fallback found ${items.length} items — correcting saved format to "row"`);
+            await storage.updateDataSource(dataSourceId, {
+              formatType: "row",
+              pivotConfig: null,
+            });
           }
         } else {
           const { parseExcelToInventory } = await import("./importUtils");
@@ -528,7 +533,11 @@ export async function executeImport(
             headers = result.headers;
             rows = result.rows;
             items = result.items;
-            console.log(`${logPrefix} Row parser fallback found ${items.length} items`);
+            console.log(`${logPrefix} Row parser fallback found ${items.length} items — correcting saved format to "row"`);
+            await storage.updateDataSource(dataSourceId, {
+              formatType: "row",
+              pivotConfig: null,
+            });
           }
         }
       }

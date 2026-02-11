@@ -3305,6 +3305,28 @@ export async function registerRoutes(
           }
 
           console.log(`[Upload] Shared parser extracted ${items.length} items`);
+
+          // If pivot parser returned 0 items and auto-detection didn't confirm
+          // the format, the saved config is stale. Fall back to row parser
+          // and correct the data source so future imports work.
+          if (items.length === 0 && !detectedFormat) {
+            console.log(`[Upload] Pivot parser returned 0 items — saved format "${pivotConfig?.format}" doesn't match this file, falling back to row parser`);
+            const rowResult = parseExcelToInventory(
+              file.buffer,
+              dataSource.columnMapping || {},
+              dataSource.cleaningConfig || {},
+            );
+            headers = rowResult.headers;
+            rows = rowResult.rows;
+            items = rowResult.items;
+            if (items.length > 0) {
+              console.log(`[Upload] Row parser found ${items.length} items — correcting saved format to "row"`);
+              await storage.updateDataSource(dataSourceId, {
+                formatType: "row",
+                pivotConfig: null,
+              });
+            }
+          }
         } else if (pivotConfig?.enabled) {
           console.log(
             `[Upload] Using legacy pivoted table parser for ${dataSource.name}`,
