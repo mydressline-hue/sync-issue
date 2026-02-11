@@ -1441,18 +1441,26 @@ function parseRowFormat(
   const sizeIdx = resolveColumnIndex(config, headersLower, "size", [
     "size", "_size", "sizename",
   ]);
-  // FIX: Detect date column BEFORE stock to avoid "available" conflict.
-  // "Earliest Available Date" was matching stock's "available" alias instead of date.
+  // FIX: Detect date column first, then stock. If both claim the same column
+  // (e.g. "Earliest Available Date" matches both "available" for stock and "available" for date),
+  // the date interpretation wins and stock re-resolves without "available".
   const dateIdx = resolveColumnIndex(config, headersLower, "shipDate", [
     "earliest available date", "available date", "earliest available",
     "eta", "ship date", "ship", "date", "arrival", "expected", "future ship",
     "delivery date", "ready date",
   ]);
-  const stockIdx = resolveColumnIndex(config, headersLower, "stock", [
-    "stock", "qty", "quantity", "onhand", "ats_qty",
+  let stockIdx = resolveColumnIndex(config, headersLower, "stock", [
+    "stock", "qty", "quantity", "available", "onhand", "ats_qty",
     "opentosale", "inventory", "_inventory_level", "immediate stock",
     "available qty", "available quantity",
   ]);
+  // If stock and date resolved to the same column, date wins — re-resolve stock without "available"
+  if (stockIdx >= 0 && stockIdx === dateIdx) {
+    stockIdx = resolveColumnIndex(config, headersLower, "stock", [
+      "stock", "qty", "quantity", "onhand", "ats_qty",
+      "opentosale", "inventory", "_inventory_level", "immediate stock",
+    ]);
+  }
   const priceIdx = resolveColumnIndex(config, headersLower, "price", [
     "price", "wholesale", "cost", "line price", "msrp", "_price",
   ]);
