@@ -891,7 +891,8 @@ function parseGenericPivotFormat(
     "color", "colour",
   ]);
   const dateIdx = resolveColumnIndex(config, headersLower, "shipDate", [
-    "date", "eta", "due", "available",
+    "earliest available date", "available date", "earliest available",
+    "date", "eta", "due", "ship date", "delivery date", "ready date",
   ]);
   const statusIdx = resolveColumnIndex(config, headersLower, "discontinued", [
     "status", "discontinued", "active",
@@ -944,6 +945,15 @@ function parseGenericPivotFormat(
       const dateVal = row[dateIdx];
       if (dateVal && typeof dateVal === "number" && dateVal > 40000) {
         shipDate = excelSerialToDate(dateVal);
+      } else if (dateVal && typeof dateVal === "string") {
+        // FIX: Handle text dates (e.g., "2025-03-15", "3/15/2025", "Mar 15, 2025")
+        const dateStr = dateVal.trim();
+        if (dateStr && dateStr.toLowerCase() !== "n/a" && dateStr.toLowerCase() !== "tbd") {
+          const parsed = new Date(dateStr);
+          if (!isNaN(parsed.getTime())) {
+            shipDate = parsed.toISOString().split("T")[0];
+          }
+        }
       }
     }
 
@@ -1431,15 +1441,20 @@ function parseRowFormat(
   const sizeIdx = resolveColumnIndex(config, headersLower, "size", [
     "size", "_size", "sizename",
   ]);
+  // FIX: Detect date column BEFORE stock to avoid "available" conflict.
+  // "Earliest Available Date" was matching stock's "available" alias instead of date.
+  const dateIdx = resolveColumnIndex(config, headersLower, "shipDate", [
+    "earliest available date", "available date", "earliest available",
+    "eta", "ship date", "ship", "date", "arrival", "expected", "future ship",
+    "delivery date", "ready date",
+  ]);
   const stockIdx = resolveColumnIndex(config, headersLower, "stock", [
-    "stock", "qty", "quantity", "available", "onhand", "ats_qty",
+    "stock", "qty", "quantity", "onhand", "ats_qty",
     "opentosale", "inventory", "_inventory_level", "immediate stock",
+    "available qty", "available quantity",
   ]);
   const priceIdx = resolveColumnIndex(config, headersLower, "price", [
     "price", "wholesale", "cost", "line price", "msrp", "_price",
-  ]);
-  const dateIdx = resolveColumnIndex(config, headersLower, "shipDate", [
-    "eta", "ship", "date", "arrival", "expected", "future ship",
   ]);
   const statusIdx = resolveColumnIndex(config, headersLower, "discontinued", [
     "status", "discontinued", "active", "_status",
