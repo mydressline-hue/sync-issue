@@ -438,7 +438,7 @@ export function parseIntelligentPivotFormat(
   options?: { sheetRows?: number },
 ): { headers: string[]; rows: any[][]; items: any[] } {
   const workbook = typeof bufferOrPath === "string"
-    ? XLSX.readFile(bufferOrPath, options?.sheetRows ? { sheetRows: options.sheetRows } : undefined)
+    ? XLSX.read(fs.readFileSync(bufferOrPath), { type: "buffer", ...(options?.sheetRows ? { sheetRows: options.sheetRows } : {}) })
     : XLSX.read(bufferOrPath, { type: "buffer", ...(options?.sheetRows ? { sheetRows: options.sheetRows } : {}) });
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
   const rawData = XLSX.utils.sheet_to_json(sheet, {
@@ -869,7 +869,7 @@ function parseSherriHillFormat(
   if (data.length < 2) return items;
 
   // DEBUG: Log stockConfig to diagnose text mappings issue
-  console.log(`[SherriHill] stockConfig:`, JSON.stringify(config.stockConfig));
+  // stockConfig logged only at debug level
   console.log(
     `[SherriHill] textMappings:`,
     JSON.stringify(config.stockConfig?.textMappings),
@@ -1653,7 +1653,8 @@ router.post("/analyze", upload.any(), async (req: Request, res: Response) => {
       let headerRow: any[] | null = null;
 
       for (const file of files) {
-        const wb = XLSX.read(file.buffer, { type: "buffer" });
+        // Read from disk path, not buffer — only first 30 rows for analysis
+        const wb = XLSX.read(fs.readFileSync(file.path), { type: "buffer", sheetRows: 30 });
         const sheet = wb.Sheets[wb.SheetNames[0]];
         const data = XLSX.utils.sheet_to_json(sheet, {
           header: 1,
@@ -1673,7 +1674,7 @@ router.post("/analyze", upload.any(), async (req: Request, res: Response) => {
       );
     } else {
       // Read directly from disk with sheetRows limit — never loads full file into memory
-      const workbook = XLSX.readFile(primaryFile.path, { sheetRows: 30 });
+      const workbook = XLSX.read(fs.readFileSync(primaryFile.path), { type: "buffer", sheetRows: 30 });
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
       rawData = XLSX.utils.sheet_to_json(sheet, {
         header: 1,
@@ -1925,19 +1926,6 @@ router.post(
                 ? { textMappings: dataSource.cleaningConfig.stockTextMappings }
                 : undefined),
           };
-          // DEBUG: Log what's being loaded for stock text mappings
-          console.log(
-            `[AIImport] dataSource.stockValueConfig:`,
-            JSON.stringify((dataSource as any).stockValueConfig),
-          );
-          console.log(
-            `[AIImport] dataSource.cleaningConfig?.stockTextMappings:`,
-            JSON.stringify(dataSource.cleaningConfig?.stockTextMappings),
-          );
-          console.log(
-            `[AIImport] enhancedConfig.stockValueConfig:`,
-            JSON.stringify(enhancedConfig.stockValueConfig),
-          );
         }
       }
 
@@ -1960,7 +1948,7 @@ router.post(
       let detectedPivotFormat: string | null = null;
       let sampleDataForGrouped: any[][] | null = null;
       {
-        const detectWb = XLSX.readFile(req.file.path, { sheetRows: 10 });
+        const detectWb = XLSX.read(fs.readFileSync(req.file.path), { type: "buffer", sheetRows: 10 });
         const detectSheet = detectWb.Sheets[detectWb.SheetNames[0]];
         const sampleData = XLSX.utils.sheet_to_json(detectSheet, {
           header: 1,
@@ -1984,21 +1972,28 @@ router.post(
 
       if (config.formatType === "pivot_grouped" && (configOverride?.groupedPivotConfig || (dataSource as any)?.groupedPivotConfig)) {
         // Grouped pivot format — read from disk, limit rows for preview
-        const fullWb = XLSX.readFile(req.file.path, { sheetRows: 500 });
-        const fullSheet = fullWb.Sheets[fullWb.SheetNames[0]];
-        const rawData = XLSX.utils.sheet_to_json(fullSheet, {
-          header: 1,
-          defval: "",
-        }) as any[][];
-        const gpConfig = configOverride?.groupedPivotConfig || (dataSource as any).groupedPivotConfig;
-        console.log(`[AIImport Preview] Using grouped pivot parser`);
-        const groupedResult = parseGroupedPivotData(rawData, gpConfig);
+        let rawDataLen = 0;
+        let groupedItems: any[];
+        {
+          const fullWb = XLSX.read(fs.readFileSync(req.file.path), { type: "buffer", sheetRows: 500 });
+          const fullSheet = fullWb.Sheets[fullWb.SheetNames[0]];
+          const rawData = XLSX.utils.sheet_to_json(fullSheet, {
+            header: 1,
+            defval: "",
+          }) as any[][];
+          rawDataLen = rawData.length;
+          const gpConfig = configOverride?.groupedPivotConfig || (dataSource as any).groupedPivotConfig;
+          console.log(`[AIImport Preview] Using grouped pivot parser`);
+          const groupedResult = parseGroupedPivotData(rawData, gpConfig);
+          groupedItems = groupedResult.items;
+        }
+        // fullWb/rawData out of scope
         parseResult = {
           success: true,
-          items: groupedResult.items,
+          items: groupedItems,
           stats: {
-            totalRows: rawData.length,
-            validItems: groupedResult.items.length,
+            totalRows: rawDataLen,
+            validItems: groupedItems.length,
             discontinuedItems: 0,
             futureStockItems: 0,
           },
@@ -2042,7 +2037,7 @@ router.post(
         };
       } else {
         // Row format preview — limit rows for memory safety
-        const previewWb = XLSX.readFile(req.file.path, { sheetRows: 500 });
+        const previewWb = XLSX.read(fs.readFileSync(req.file.path), { type: "buffer", sheetRows: 500 });
         const previewSheet = previewWb.Sheets[previewWb.SheetNames[0]];
         const previewBuffer = XLSX.write(previewWb, { type: "buffer", bookType: "xlsx" });
         parseResult = await parseWithEnhancedConfig(
@@ -2158,9 +2153,19 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
       cleaningConfig: (dataSource as any).cleaningConfig,
     };
 
+    // =====================================================================
+    // SETUP-ONLY IMPORT: Limit to 1000 rows to prevent OOM
+    // /execute is only called from the UI during data source setup.
+    // The actual full import runs later via scheduler (executeAIImport →
+    // executeImport in importEngine) which streams from URL/email.
+    // =====================================================================
+    const SETUP_ROW_LIMIT = 1000;
+    console.log(`[AIImport] Setup import — limiting to ${SETUP_ROW_LIMIT} rows (full sync runs on schedule)`);
+
     // Consolidate multiple files if in multi-file mode
     let rawData: any[][] = [];
     const primaryFile = files[0];
+    let consolidatedFilePath: string = primaryFile.path;
 
     if (files.length > 1 && req.body.multiFileMode === "true") {
       console.log(
@@ -2169,7 +2174,8 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
       let headerRow: any[] | null = null;
 
       for (const file of files) {
-        const wb = XLSX.read(file.buffer, { type: "buffer" });
+        // Limit rows per file during setup
+        const wb = XLSX.read(fs.readFileSync(file.path), { type: "buffer", sheetRows: SETUP_ROW_LIMIT });
         const sheet = wb.Sheets[wb.SheetNames[0]];
         const data = XLSX.utils.sheet_to_json(sheet, {
           header: 1,
@@ -2187,31 +2193,29 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
       console.log(
         `[AIImport] Consolidated ${rawData.length} total rows from ${files.length} files`,
       );
-    } else {
-      const workbook = XLSX.read(primaryFile.buffer, { type: "buffer" });
-      const sheet = workbook.Sheets[workbook.SheetNames[0]];
-      rawData = XLSX.utils.sheet_to_json(sheet, {
-        header: 1,
-        defval: "",
-      }) as any[][];
-    }
 
-    // CRITICAL FIX: For multi-file mode, create a consolidated buffer for pivot parsing
-    // This ensures ALL files' data is parsed, not just the first file
-    let consolidatedBuffer: Buffer;
-    if (files.length > 1 && req.body.multiFileMode === "true") {
-      // Create a new workbook from consolidated rawData
-      const newWorkbook = XLSX.utils.book_new();
-      const newSheet = XLSX.utils.aoa_to_sheet(rawData);
-      XLSX.utils.book_append_sheet(newWorkbook, newSheet, "Consolidated");
-      consolidatedBuffer = Buffer.from(
-        XLSX.write(newWorkbook, { type: "buffer", bookType: "xlsx" }),
-      );
+      // Write consolidated data to a temp file so parsers can read from disk
+      {
+        const newWorkbook = XLSX.utils.book_new();
+        const newSheet = XLSX.utils.aoa_to_sheet(rawData);
+        XLSX.utils.book_append_sheet(newWorkbook, newSheet, "Consolidated");
+        consolidatedFilePath = path.join(os.tmpdir(), `consolidated-${Date.now()}.xlsx`);
+        fs.writeFileSync(consolidatedFilePath, Buffer.from(XLSX.write(newWorkbook, { type: "buffer", bookType: "xlsx" })));
+      }
       console.log(
-        `[AIImport] Created consolidated buffer (${consolidatedBuffer.length} bytes) from ${rawData.length} rows`,
+        `[AIImport] Wrote consolidated file to ${consolidatedFilePath}`,
       );
     } else {
-      consolidatedBuffer = primaryFile.buffer;
+      // Single file — read only first 10 rows for detection, keep file on disk
+      {
+        const sampleWb = XLSX.read(fs.readFileSync(primaryFile.path), { type: "buffer", sheetRows: 10 });
+        const sampleSheet = sampleWb.Sheets[sampleWb.SheetNames[0]];
+        rawData = XLSX.utils.sheet_to_json(sampleSheet, {
+          header: 1,
+          defval: "",
+        }) as any[][];
+      }
+      // sampleWb/sampleSheet now out of scope — eligible for GC
     }
 
     const detectedPivotFormat = autoDetectPivotFormat(
@@ -2226,8 +2230,22 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
 
     let parseResult: any;
 
+    // Trigger GC before heavy file parsing to reclaim any stale memory
+    if (global.gc) {
+      global.gc();
+      console.log(`[AIImport] GC triggered before file parsing`);
+    }
+
     if (config.formatType === "pivot_grouped" && (overrideConfig?.groupedPivotConfig || (dataSource as any).groupedPivotConfig)) {
-      // Grouped pivot format — use universal parser extractor
+      // Grouped pivot format — read limited rows from disk for setup
+      if (rawData.length <= 10) {
+        {
+          const fullWb = XLSX.read(fs.readFileSync(consolidatedFilePath), { type: "buffer", sheetRows: SETUP_ROW_LIMIT });
+          const fullSheet = fullWb.Sheets[fullWb.SheetNames[0]];
+          rawData = XLSX.utils.sheet_to_json(fullSheet, { header: 1, defval: "" }) as any[][];
+        }
+        // fullWb/fullSheet now out of scope
+      }
       const gpConfig = overrideConfig?.groupedPivotConfig || (dataSource as any).groupedPivotConfig;
       console.log(`[AIImport Execute] Using grouped pivot parser`);
       const groupedResult = parseGroupedPivotData(rawData, gpConfig);
@@ -2253,13 +2271,14 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
         columnMapping: config.columnMapping,
       };
 
-      // Use consolidated buffer (contains ALL files' data in multi-file mode)
+      // Read from disk — limited rows for setup import
       const pivotResult = parseIntelligentPivotFormat(
-        consolidatedBuffer,
+        consolidatedFilePath,
         actualFormat,
         universalConfig,
         dataSource.name,
         primaryFile.originalname,
+        { sheetRows: SETUP_ROW_LIMIT },
       );
 
       parseResult = {
@@ -2277,11 +2296,23 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
         warnings: [],
       };
     } else {
-      parseResult = await parseWithEnhancedConfig(
-        primaryFile.buffer,
-        config,
-        dataSourceId,
-      );
+      // Row format — read limited rows from disk for setup import
+      // Create a small buffer with only SETUP_ROW_LIMIT rows instead of full file
+      {
+        const limitedWb = XLSX.read(fs.readFileSync(primaryFile.path), {
+          type: "buffer",
+          sheetRows: SETUP_ROW_LIMIT,
+        });
+        const limitedBuf = Buffer.from(
+          XLSX.write(limitedWb, { type: "buffer", bookType: "xlsx" }),
+        );
+        // limitedWb goes out of scope, pass small buffer to parser
+        parseResult = await parseWithEnhancedConfig(
+          limitedBuf,
+          config,
+          dataSourceId,
+        );
+      }
     }
 
     if (!parseResult.success) {
@@ -2371,6 +2402,11 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
       importRulesConfig,
       rawData, // Pass raw data rows for context
     );
+
+    // Free rawData and parseResult.items — no longer needed after import rules
+    const totalParsedCount = parseResult.items.length;
+    rawData = [];
+    parseResult.items = [];
 
     console.log(
       `[AIImport] Import rules applied: ${importRulesResult.stats.discontinuedFiltered} discontinued, ${importRulesResult.stats.datesParsed} dates parsed`,
@@ -2883,13 +2919,7 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
       `[AIImport] stockInfo: ${itemsWithStockInfo}/${itemsToSave.length} items have messages`,
     );
 
-    // DEBUG: Show first 3 items with their stockInfo
-    console.log(`[AIImport] Sample items being saved:`);
-    itemsToSave.slice(0, 3).forEach((item, i) => {
-      console.log(
-        `  Item ${i + 1}: sku="${item.sku}" stock=${item.stock} stockInfo="${item.stockInfo}"`,
-      );
-    });
+    // Sample items logged only at debug level
 
     // ============================================================
     // BUG FIX: Respect updateStrategy setting
@@ -3142,8 +3172,8 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
             `[AIImport] Running post-import validation for ${dataSource.name}...`,
           );
 
-          // 1. Capture source checksums from parsed items
-          const itemsForChecksum = parseResult?.items || itemsToSave || [];
+          // 1. Capture source checksums from final items
+          const itemsForChecksum = itemsToSave;
           if (itemsForChecksum.length === 0) {
             console.warn(`[AIImport] No items to validate`);
           } else {
@@ -3262,7 +3292,7 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
       stats: {
         ...parseResult.stats,
         // Add rule processing stats
-        totalParsed: parseResult.items.length,
+        totalParsed: totalParsedCount,
         afterImportRules: importRulesResult.items.length,
         afterVariantRules: variantRulesResult.items.length,
         afterPriceExpansion: itemsAfterExpansion.length,

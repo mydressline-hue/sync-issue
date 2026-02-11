@@ -578,7 +578,7 @@ export async function parseWithEnhancedConfig(
 
     // Get column indices from mapping
     const mapping = config.columnMapping || {};
-    console.log(`[EnhancedParser] Column mapping:`, JSON.stringify(mapping));
+    console.log(`[EnhancedParser] Column mapping keys: ${Object.keys(mapping).join(", ")}`);
 
     const styleIdx = findColumnIndex(mapping.style);
     const colorIdx = findColumnIndex(mapping.color);

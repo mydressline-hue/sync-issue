@@ -3204,13 +3204,13 @@ export async function registerRoutes(
         // This ensures manual upload uses the EXACT SAME parsing as AI import and email import
         console.log(`[Upload] Processing file for ${dataSource.name}`);
         let pivotConfig = (dataSource as any).pivotConfig;
-        console.log(`[Upload] pivotConfig:`, JSON.stringify(pivotConfig));
+        console.log(`[Upload] pivotConfig.enabled: ${pivotConfig?.enabled}, format: ${pivotConfig?.format}`);
 
         // Detect format from file content using the shared detector
         // Only parse first 10 rows for detection to minimize memory usage
         let detectedFormat: string | null = null;
         {
-          const detectWorkbook = XLSX.readFile(file.path, { sheetRows: 10 });
+          const detectWorkbook = XLSX.read(fs.readFileSync(file.path), { type: "buffer", sheetRows: 10 });
           const detectSheet = detectWorkbook.Sheets[detectWorkbook.SheetNames[0]];
           const sampleData = XLSX.utils.sheet_to_json(detectSheet, {
             header: 1,
@@ -13161,13 +13161,7 @@ export async function registerRoutes(
                 console.warn("Error parsing images data:", e);
               }
 
-              console.log(
-                `[Background] Storing product "${item.title}" with ${imageColorAssignments.length} imageColorAssignments and ${colors.length} colors`,
-              );
-              console.log(
-                `[Background]   imageColorAssignments: ${JSON.stringify(imageColorAssignments)}`,
-              );
-              console.log(`[Background]   colors: ${JSON.stringify(colors)}`);
+              // Summary only — skip verbose JSON dumps
               productsWithItems.push({
                 item,
                 imageColorAssignments, // For assigning images to specific color variants
