@@ -1653,7 +1653,8 @@ router.post("/analyze", upload.any(), async (req: Request, res: Response) => {
       let headerRow: any[] | null = null;
 
       for (const file of files) {
-        const wb = XLSX.read(file.buffer, { type: "buffer" });
+        // Read from disk path, not buffer — only first 30 rows for analysis
+        const wb = XLSX.read(fs.readFileSync(file.path), { type: "buffer", sheetRows: 30 });
         const sheet = wb.Sheets[wb.SheetNames[0]];
         const data = XLSX.utils.sheet_to_json(sheet, {
           header: 1,
@@ -1971,21 +1972,28 @@ router.post(
 
       if (config.formatType === "pivot_grouped" && (configOverride?.groupedPivotConfig || (dataSource as any)?.groupedPivotConfig)) {
         // Grouped pivot format — read from disk, limit rows for preview
-        const fullWb = XLSX.read(fs.readFileSync(req.file.path), { type: "buffer", sheetRows: 500 });
-        const fullSheet = fullWb.Sheets[fullWb.SheetNames[0]];
-        const rawData = XLSX.utils.sheet_to_json(fullSheet, {
-          header: 1,
-          defval: "",
-        }) as any[][];
-        const gpConfig = configOverride?.groupedPivotConfig || (dataSource as any).groupedPivotConfig;
-        console.log(`[AIImport Preview] Using grouped pivot parser`);
-        const groupedResult = parseGroupedPivotData(rawData, gpConfig);
+        let rawDataLen = 0;
+        let groupedItems: any[];
+        {
+          const fullWb = XLSX.read(fs.readFileSync(req.file.path), { type: "buffer", sheetRows: 500 });
+          const fullSheet = fullWb.Sheets[fullWb.SheetNames[0]];
+          const rawData = XLSX.utils.sheet_to_json(fullSheet, {
+            header: 1,
+            defval: "",
+          }) as any[][];
+          rawDataLen = rawData.length;
+          const gpConfig = configOverride?.groupedPivotConfig || (dataSource as any).groupedPivotConfig;
+          console.log(`[AIImport Preview] Using grouped pivot parser`);
+          const groupedResult = parseGroupedPivotData(rawData, gpConfig);
+          groupedItems = groupedResult.items;
+        }
+        // fullWb/rawData out of scope
         parseResult = {
           success: true,
-          items: groupedResult.items,
+          items: groupedItems,
           stats: {
-            totalRows: rawData.length,
-            validItems: groupedResult.items.length,
+            totalRows: rawDataLen,
+            validItems: groupedItems.length,
             discontinuedItems: 0,
             futureStockItems: 0,
           },
@@ -2187,12 +2195,15 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
       );
     } else {
       // Single file — read only first 10 rows for detection, keep file on disk
-      const sampleWb = XLSX.read(fs.readFileSync(primaryFile.path), { type: "buffer", sheetRows: 10 });
-      const sampleSheet = sampleWb.Sheets[sampleWb.SheetNames[0]];
-      rawData = XLSX.utils.sheet_to_json(sampleSheet, {
-        header: 1,
-        defval: "",
-      }) as any[][];
+      {
+        const sampleWb = XLSX.read(fs.readFileSync(primaryFile.path), { type: "buffer", sheetRows: 10 });
+        const sampleSheet = sampleWb.Sheets[sampleWb.SheetNames[0]];
+        rawData = XLSX.utils.sheet_to_json(sampleSheet, {
+          header: 1,
+          defval: "",
+        }) as any[][];
+      }
+      // sampleWb/sampleSheet now out of scope — eligible for GC
     }
 
     const detectedPivotFormat = autoDetectPivotFormat(
@@ -2207,13 +2218,22 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
 
     let parseResult: any;
 
+    // Trigger GC before heavy file parsing to reclaim any stale memory
+    if (global.gc) {
+      global.gc();
+      console.log(`[AIImport] GC triggered before file parsing`);
+    }
+
     if (config.formatType === "pivot_grouped" && (overrideConfig?.groupedPivotConfig || (dataSource as any).groupedPivotConfig)) {
       // Grouped pivot format — read full data from disk
       if (rawData.length <= 10) {
         // We only loaded sample, need full data for grouped pivot
-        const fullWb = XLSX.read(fs.readFileSync(consolidatedFilePath), { type: "buffer" });
-        const fullSheet = fullWb.Sheets[fullWb.SheetNames[0]];
-        rawData = XLSX.utils.sheet_to_json(fullSheet, { header: 1, defval: "" }) as any[][];
+        {
+          const fullWb = XLSX.read(fs.readFileSync(consolidatedFilePath), { type: "buffer" });
+          const fullSheet = fullWb.Sheets[fullWb.SheetNames[0]];
+          rawData = XLSX.utils.sheet_to_json(fullSheet, { header: 1, defval: "" }) as any[][];
+        }
+        // fullWb/fullSheet now out of scope
       }
       const gpConfig = overrideConfig?.groupedPivotConfig || (dataSource as any).groupedPivotConfig;
       console.log(`[AIImport Execute] Using grouped pivot parser`);
@@ -2359,6 +2379,11 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
       importRulesConfig,
       rawData, // Pass raw data rows for context
     );
+
+    // Free rawData and parseResult.items — no longer needed after import rules
+    const totalParsedCount = parseResult.items.length;
+    rawData = [];
+    parseResult.items = [];
 
     console.log(
       `[AIImport] Import rules applied: ${importRulesResult.stats.discontinuedFiltered} discontinued, ${importRulesResult.stats.datesParsed} dates parsed`,
@@ -3124,8 +3149,8 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
             `[AIImport] Running post-import validation for ${dataSource.name}...`,
           );
 
-          // 1. Capture source checksums from parsed items
-          const itemsForChecksum = parseResult?.items || itemsToSave || [];
+          // 1. Capture source checksums from final items
+          const itemsForChecksum = itemsToSave;
           if (itemsForChecksum.length === 0) {
             console.warn(`[AIImport] No items to validate`);
           } else {
@@ -3244,7 +3269,7 @@ router.post("/execute", upload.any(), async (req: Request, res: Response) => {
       stats: {
         ...parseResult.stats,
         // Add rule processing stats
-        totalParsed: parseResult.items.length,
+        totalParsed: totalParsedCount,
         afterImportRules: importRulesResult.items.length,
         afterVariantRules: variantRulesResult.items.length,
         afterPriceExpansion: itemsAfterExpansion.length,
