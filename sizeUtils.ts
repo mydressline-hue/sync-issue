@@ -71,10 +71,18 @@ export function getSizeRank(size: string): number {
 }
 
 // Size limit configuration type
+// Supports three independent size ranges that work simultaneously:
+//   Numeric range: minSize/maxSize (e.g., 4–20)
+//   W-size range:  minWSize/maxWSize (e.g., 16W–24W)
+//   Letter range:  minLetterSize/maxLetterSize (e.g., XS–XL)
+// A size is allowed if it falls within ANY configured range.
+// Sizes that don't match any configured range are filtered out.
 export interface SizeLimitConfig {
   enabled?: boolean;
   minSize?: string;        // Min numeric size (0, 2, 4...)
   maxSize?: string;        // Max numeric size (0, 2, 4...)
+  minWSize?: string;       // Min W/plus size (16W, 18W...)
+  maxWSize?: string;       // Max W/plus size (24W, 26W...)
   minLetterSize?: string;  // Min letter size (S, M, L...)
   maxLetterSize?: string;  // Max letter size (S, M, L...)
   allowedSizes?: string[];
@@ -82,6 +90,8 @@ export interface SizeLimitConfig {
     pattern: string;
     minSize?: string;
     maxSize?: string;
+    minWSize?: string;
+    maxWSize?: string;
     minLetterSize?: string;
     maxLetterSize?: string;
     allowedSizes?: string[];
@@ -99,8 +109,29 @@ function isWSize(size: string): boolean {
   return size.toUpperCase().endsWith('W');
 }
 
+// Helper: check if a size rank falls within a min/max range
+function isInRange(normalizedSize: string, min?: string, max?: string): boolean {
+  const sizeRank = getSizeRank(normalizedSize);
+  if (min) {
+    const minRank = getSizeRank(min);
+    if (sizeRank < minRank) return false;
+  }
+  if (max) {
+    const maxRank = getSizeRank(max);
+    if (sizeRank > maxRank) return false;
+  }
+  return true;
+}
+
 // Check if a size is within the allowed range
 // Returns true if size is allowed, false if it should be filtered out
+//
+// Three independent ranges can be configured simultaneously:
+//   1. Numeric: minSize/maxSize  (e.g., 4–20)
+//   2. W-size:  minWSize/maxWSize (e.g., 16W–24W)
+//   3. Letter:  minLetterSize/maxLetterSize (e.g., XS–XL)
+// A size is ALLOWED if it matches ANY configured range.
+// A size is REJECTED if at least one range is configured but the size doesn't match any.
 export function isSizeAllowed(
   size: string,
   sizeLimitConfig: SizeLimitConfig | null | undefined,
@@ -119,6 +150,8 @@ export function isSizeAllowed(
   // Find applicable size limits (check prefix overrides first)
   let minSize = sizeLimitConfig.minSize;
   let maxSize = sizeLimitConfig.maxSize;
+  let minWSize = sizeLimitConfig.minWSize;
+  let maxWSize = sizeLimitConfig.maxWSize;
   let minLetterSize = sizeLimitConfig.minLetterSize;
   let maxLetterSize = sizeLimitConfig.maxLetterSize;
   let allowedSizes = sizeLimitConfig.allowedSizes;
@@ -127,27 +160,23 @@ export function isSizeAllowed(
   if (style && sizeLimitConfig.prefixOverrides?.length) {
     for (const override of sizeLimitConfig.prefixOverrides) {
       if (override.pattern) {
+        let matched = false;
         try {
           const regex = new RegExp(override.pattern, 'i');
-          if (regex.test(style)) {
-            // Use override settings
-            minSize = override.minSize ?? minSize;
-            maxSize = override.maxSize ?? maxSize;
-            minLetterSize = override.minLetterSize ?? minLetterSize;
-            maxLetterSize = override.maxLetterSize ?? maxLetterSize;
-            allowedSizes = override.allowedSizes ?? allowedSizes;
-            break;
-          }
+          matched = regex.test(style);
         } catch (e) {
-          // Invalid regex, try literal match
-          if (style.toLowerCase().startsWith(override.pattern.toLowerCase())) {
-            minSize = override.minSize ?? minSize;
-            maxSize = override.maxSize ?? maxSize;
-            minLetterSize = override.minLetterSize ?? minLetterSize;
-            maxLetterSize = override.maxLetterSize ?? maxLetterSize;
-            allowedSizes = override.allowedSizes ?? allowedSizes;
-            break;
-          }
+          // Invalid regex, try literal prefix match
+          matched = style.toLowerCase().startsWith(override.pattern.toLowerCase());
+        }
+        if (matched) {
+          minSize = override.minSize ?? minSize;
+          maxSize = override.maxSize ?? maxSize;
+          minWSize = override.minWSize ?? minWSize;
+          maxWSize = override.maxWSize ?? maxWSize;
+          minLetterSize = override.minLetterSize ?? minLetterSize;
+          maxLetterSize = override.maxLetterSize ?? maxLetterSize;
+          allowedSizes = override.allowedSizes ?? allowedSizes;
+          break;
         }
       }
     }
@@ -161,94 +190,71 @@ export function isSizeAllowed(
     );
   }
 
-  // Determine if this is a letter size or numeric size
-  const isLetter = isLetterSize(normalizedSize);
+  // Determine which ranges are configured
+  const numericConfigured = !!(minSize || maxSize);
+  const wConfigured = !!(minWSize || maxWSize);
+  const letterConfigured = !!(minLetterSize || maxLetterSize);
 
-  if (isLetter) {
-    // Check against letter size limits (if configured)
-    if (minLetterSize || maxLetterSize) {
-      const sizeRank = getSizeRank(normalizedSize);
-
-      if (minLetterSize) {
-        const minRank = getSizeRank(minLetterSize);
-        if (sizeRank < minRank) {
-          return false;
-        }
-      }
-
-      if (maxLetterSize) {
-        const maxRank = getSizeRank(maxLetterSize);
-        if (sizeRank > maxRank) {
-          return false;
-        }
-      }
-      return true;
-    }
-
-    // If numeric limits ARE set but no letter limits, BLOCK letter sizes
-    // (user specified a numeric range like 00-24, so they don't want S, M, L, etc.)
-    if (minSize || maxSize) {
-      return false;
-    }
-
-    // If no limits at all, allow everything
-    return true;
-  } else {
-    // Check against numeric size limits (if configured)
-    if (minSize || maxSize) {
-      const sizeIsW = isWSize(normalizedSize);
-      const minIsW = minSize ? isWSize(minSize) : null;
-      const maxIsW = maxSize ? isWSize(maxSize) : null;
-
-      // W sizes and regular sizes are separate tracks:
-      // Determine if W sizes are allowed based on the configured limits
-      // W sizes are only allowed if at least one limit is a W size
-      const wSizesAllowed = (minIsW === true) || (maxIsW === true);
-
-      if (sizeIsW && !wSizesAllowed) {
-        return false; // W size not allowed when both min and max are non-W
-      }
-
-      const sizeRank = getSizeRank(normalizedSize);
-
-      if (minSize) {
-        const minRank = getSizeRank(minSize);
-        if (sizeRank < minRank) {
-          return false;
-        }
-      }
-
-      if (maxSize) {
-        const maxRank = getSizeRank(maxSize);
-        if (sizeRank > maxRank) {
-          return false;
-        }
-      }
-      return true;
-    }
-
-    // If letter limits ARE set but no numeric limits, BLOCK numeric sizes
-    // (user specified a letter range like S-XL, so they don't want 0, 2, 4, etc.)
-    if (minLetterSize || maxLetterSize) {
-      return false;
-    }
-
-    // If no limits at all, allow everything
+  // If no ranges configured at all, allow everything
+  if (!numericConfigured && !wConfigured && !letterConfigured) {
     return true;
   }
+
+  // Classify this size
+  const isLetter = isLetterSize(normalizedSize);
+  const sizeIsW = isWSize(normalizedSize);
+
+  // --- Letter sizes (XS, S, M, L, XL, ...) ---
+  if (isLetter) {
+    if (letterConfigured) {
+      return isInRange(normalizedSize, minLetterSize, maxLetterSize);
+    }
+    // No letter range configured → this size type is not allowed
+    return false;
+  }
+
+  // --- W/plus sizes (16W, 18W, 20W, ...) ---
+  if (sizeIsW) {
+    // Dedicated W range takes priority
+    if (wConfigured) {
+      return isInRange(normalizedSize, minWSize, maxWSize);
+    }
+    // Backward compat: if no dedicated W range, check numeric range
+    // but only if the numeric min or max is itself a W value
+    if (numericConfigured) {
+      const minIsW = minSize ? isWSize(minSize) : false;
+      const maxIsW = maxSize ? isWSize(maxSize) : false;
+      if (minIsW || maxIsW) {
+        return isInRange(normalizedSize, minSize, maxSize);
+      }
+    }
+    // No W range and numeric range doesn't include W values → blocked
+    return false;
+  }
+
+  // --- Regular numeric sizes (0, 2, 4, 6, ...) ---
+  if (numericConfigured) {
+    return isInRange(normalizedSize, minSize, maxSize);
+  }
+
+  // Not a letter, not a W, and no numeric range configured → blocked
+  // (this also catches garbage like DOZEN, UNIT, SS, LLL, etc.)
+  return false;
 }
 
 // Get the effective size limits for a given style (resolves prefix overrides)
 export function getEffectiveSizeLimits(
   sizeLimitConfig: SizeLimitConfig | null | undefined,
   style?: string
-): { minSize?: string; maxSize?: string; minLetterSize?: string; maxLetterSize?: string; allowedSizes?: string[] } | null {
+): { minSize?: string; maxSize?: string; minWSize?: string; maxWSize?: string; minLetterSize?: string; maxLetterSize?: string; allowedSizes?: string[] } | null {
   if (!sizeLimitConfig?.enabled) {
     return null;
   }
 
   let minSize = sizeLimitConfig.minSize;
   let maxSize = sizeLimitConfig.maxSize;
+  let minWSize = sizeLimitConfig.minWSize;
+  let maxWSize = sizeLimitConfig.maxWSize;
   let minLetterSize = sizeLimitConfig.minLetterSize;
   let maxLetterSize = sizeLimitConfig.maxLetterSize;
   let allowedSizes = sizeLimitConfig.allowedSizes;
@@ -257,31 +263,28 @@ export function getEffectiveSizeLimits(
   if (style && sizeLimitConfig.prefixOverrides?.length) {
     for (const override of sizeLimitConfig.prefixOverrides) {
       if (override.pattern) {
+        let matched = false;
         try {
           const regex = new RegExp(override.pattern, 'i');
-          if (regex.test(style)) {
-            minSize = override.minSize ?? minSize;
-            maxSize = override.maxSize ?? maxSize;
-            minLetterSize = override.minLetterSize ?? minLetterSize;
-            maxLetterSize = override.maxLetterSize ?? maxLetterSize;
-            allowedSizes = override.allowedSizes ?? allowedSizes;
-            break;
-          }
+          matched = regex.test(style);
         } catch (e) {
-          if (style.toLowerCase().startsWith(override.pattern.toLowerCase())) {
-            minSize = override.minSize ?? minSize;
-            maxSize = override.maxSize ?? maxSize;
-            minLetterSize = override.minLetterSize ?? minLetterSize;
-            maxLetterSize = override.maxLetterSize ?? maxLetterSize;
-            allowedSizes = override.allowedSizes ?? allowedSizes;
-            break;
-          }
+          matched = style.toLowerCase().startsWith(override.pattern.toLowerCase());
+        }
+        if (matched) {
+          minSize = override.minSize ?? minSize;
+          maxSize = override.maxSize ?? maxSize;
+          minWSize = override.minWSize ?? minWSize;
+          maxWSize = override.maxWSize ?? maxWSize;
+          minLetterSize = override.minLetterSize ?? minLetterSize;
+          maxLetterSize = override.maxLetterSize ?? maxLetterSize;
+          allowedSizes = override.allowedSizes ?? allowedSizes;
+          break;
         }
       }
     }
   }
 
-  return { minSize, maxSize, minLetterSize, maxLetterSize, allowedSizes };
+  return { minSize, maxSize, minWSize, maxWSize, minLetterSize, maxLetterSize, allowedSizes };
 }
 
 // Generate list of allowed sizes between min and max

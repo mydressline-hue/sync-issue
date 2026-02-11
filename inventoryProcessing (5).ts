@@ -713,6 +713,7 @@ export async function applyVariantRules(
     // Log size limit configuration
     console.log(
       `[SizeLimits] Config: min=${sizeLimitConfig.minSize || "none"}, max=${sizeLimitConfig.maxSize || "none"}, ` +
+        `minW=${(sizeLimitConfig as any).minWSize || "none"}, maxW=${(sizeLimitConfig as any).maxWSize || "none"}, ` +
         `minLetter=${sizeLimitConfig.minLetterSize || "none"}, maxLetter=${sizeLimitConfig.maxLetterSize || "none"}, ` +
         `prefixOverrides=${sizeLimitConfig.prefixOverrides?.length || 0}`,
     );
@@ -720,7 +721,9 @@ export async function applyVariantRules(
       for (const override of sizeLimitConfig.prefixOverrides) {
         console.log(
           `[SizeLimits] Prefix override: pattern="${override.pattern}", ` +
-            `minSize=${override.minSize || "inherit"}, maxSize=${override.maxSize || "inherit"}`,
+            `minSize=${override.minSize || "inherit"}, maxSize=${override.maxSize || "inherit"}, ` +
+            `minW=${(override as any).minWSize || "inherit"}, maxW=${(override as any).maxWSize || "inherit"}, ` +
+            `minLetter=${override.minLetterSize || "inherit"}, maxLetter=${override.maxLetterSize || "inherit"}`,
         );
       }
     }
