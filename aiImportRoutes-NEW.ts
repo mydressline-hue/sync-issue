@@ -1445,8 +1445,8 @@ function parseRowFormat(
     "size", "_size", "sizename",
   ]);
   const stockIdx = resolveColumnIndex(config, headersLower, "stock", [
-    "stock", "qty", "quantity", "available", "onhand", "ats_qty",
-    "opentosale", "inventory", "_inventory_level", "immediate stock",
+    "stock", "qty", "quantity", "inventory", "_inventory_level",
+    "available", "onhand", "ats_qty", "opentosale", "immediate stock",
   ]);
   const priceIdx = resolveColumnIndex(config, headersLower, "price", [
     "price", "wholesale", "cost", "line price", "msrp", "_price",
