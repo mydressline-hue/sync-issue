@@ -17,6 +17,9 @@
 
 import { Router, Request, Response } from "express";
 import multer from "multer";
+import fs from "fs";
+import os from "os";
+import path from "path";
 import * as XLSX from "xlsx";
 import { storage } from "./storage";
 import { detectFileFormat } from "./aiFormatDetection";
@@ -51,7 +54,48 @@ import { executeImport } from "./importEngine";
 import { analyzeFileWithAI, parseGroupedPivotData, toEnhancedConfig } from "./universalParser";
 
 const router = Router();
-const upload = multer({ storage: multer.memoryStorage() });
+
+// Disk storage to avoid OOM from large files in RAM
+const aiUploadDir = path.join(os.tmpdir(), "ai-uploads");
+if (!fs.existsSync(aiUploadDir)) fs.mkdirSync(aiUploadDir, { recursive: true });
+const _multer = multer({
+  storage: multer.diskStorage({
+    destination: aiUploadDir,
+    filename: (_req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
+  }),
+  limits: { fileSize: 50 * 1024 * 1024 },
+});
+
+// Lazily load file.buffer from disk so existing handlers work unchanged
+function loadBufferFromDisk(req: any, _res: any, next: any) {
+  const patchFile = (file: any) => {
+    if (file && file.path && !file.buffer) {
+      let _buf: Buffer | null = null;
+      Object.defineProperty(file, "buffer", {
+        get() {
+          if (!_buf) _buf = fs.readFileSync(file.path);
+          return _buf;
+        },
+        configurable: true,
+      });
+    }
+  };
+  if (req.file) patchFile(req.file);
+  if (Array.isArray(req.files)) req.files.forEach(patchFile);
+  _res.on("finish", () => {
+    const files = req.file ? [req.file] : Array.isArray(req.files) ? req.files : [];
+    for (const f of files) {
+      if (f?.path) fs.unlink(f.path, () => {});
+    }
+  });
+  next();
+}
+
+const upload = {
+  single: (field: string) => [_multer.single(field), loadBufferFromDisk],
+  array: (field: string, maxCount?: number) => [_multer.array(field, maxCount), loadBufferFromDisk],
+  any: () => [_multer.any(), loadBufferFromDisk],
+};
 
 // ============================================================
 // TYPE DEFINITIONS
@@ -386,13 +430,16 @@ export function autoDetectPivotFormat(
 // ============================================================
 
 export function parseIntelligentPivotFormat(
-  buffer: Buffer,
+  bufferOrPath: Buffer | string,
   formatType: string,
   config: UniversalParserConfig,
   dataSourceName?: string,
   filename?: string,
+  options?: { sheetRows?: number },
 ): { headers: string[]; rows: any[][]; items: any[] } {
-  const workbook = XLSX.read(buffer, { type: "buffer" });
+  const workbook = typeof bufferOrPath === "string"
+    ? XLSX.readFile(bufferOrPath, options?.sheetRows ? { sheetRows: options.sheetRows } : undefined)
+    : XLSX.read(bufferOrPath, { type: "buffer", ...(options?.sheetRows ? { sheetRows: options.sheetRows } : {}) });
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
   const rawData = XLSX.utils.sheet_to_json(sheet, {
     header: 1,
@@ -1625,7 +1672,8 @@ router.post("/analyze", upload.any(), async (req: Request, res: Response) => {
         `[AIImport] Consolidated ${rawData.length} total rows from ${files.length} files`,
       );
     } else {
-      const workbook = XLSX.read(primaryFile.buffer, { type: "buffer" });
+      // Read directly from disk with sheetRows limit — never loads full file into memory
+      const workbook = XLSX.readFile(primaryFile.path, { sheetRows: 30 });
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
       rawData = XLSX.utils.sheet_to_json(sheet, {
         header: 1,
@@ -1908,18 +1956,25 @@ router.post(
           configOverride?.stockValueConfig || enhancedConfig.stockValueConfig,
       };
 
-      const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
-      const sheet = workbook.Sheets[workbook.SheetNames[0]];
-      const rawData = XLSX.utils.sheet_to_json(sheet, {
-        header: 1,
-        defval: "",
-      }) as any[][];
-
-      const detectedPivotFormat = autoDetectPivotFormat(
-        rawData,
-        dataSource?.name,
-        req.file.originalname,
-      );
+      // Detect format using only first 10 rows to minimize memory
+      let detectedPivotFormat: string | null = null;
+      let sampleDataForGrouped: any[][] | null = null;
+      {
+        const detectWb = XLSX.readFile(req.file.path, { sheetRows: 10 });
+        const detectSheet = detectWb.Sheets[detectWb.SheetNames[0]];
+        const sampleData = XLSX.utils.sheet_to_json(detectSheet, {
+          header: 1,
+          defval: "",
+        }) as any[][];
+        detectedPivotFormat = autoDetectPivotFormat(
+          sampleData,
+          dataSource?.name,
+          req.file.originalname,
+        );
+        // Keep sample for grouped pivot check below (small, only 10 rows)
+        sampleDataForGrouped = sampleData;
+        // detectWb goes out of scope → GC can reclaim
+      }
       const isPivotFormat =
         config.formatType?.startsWith("pivot") ||
         config.formatType === "pivoted" ||
@@ -1928,7 +1983,13 @@ router.post(
       let parseResult: any;
 
       if (config.formatType === "pivot_grouped" && (configOverride?.groupedPivotConfig || (dataSource as any)?.groupedPivotConfig)) {
-        // Grouped pivot format — use universal parser extractor
+        // Grouped pivot format — read from disk, limit rows for preview
+        const fullWb = XLSX.readFile(req.file.path, { sheetRows: 500 });
+        const fullSheet = fullWb.Sheets[fullWb.SheetNames[0]];
+        const rawData = XLSX.utils.sheet_to_json(fullSheet, {
+          header: 1,
+          defval: "",
+        }) as any[][];
         const gpConfig = configOverride?.groupedPivotConfig || (dataSource as any).groupedPivotConfig;
         console.log(`[AIImport Preview] Using grouped pivot parser`);
         const groupedResult = parseGroupedPivotData(rawData, gpConfig);
@@ -1954,12 +2015,15 @@ router.post(
           columnMapping: config.columnMapping,
         };
 
+        // Preview only needs ~100 items — limit rows parsed to save memory
+        // 500 sheet rows is enough for most pivot files (each row = 1 style-color combo)
         const pivotResult = parseIntelligentPivotFormat(
-          req.file.buffer,
+          req.file.path,
           actualFormat,
           universalConfig,
           dataSource?.name,
           req.file.originalname,
+          { sheetRows: 500 },
         );
 
         parseResult = {
@@ -1977,8 +2041,12 @@ router.post(
           warnings: [],
         };
       } else {
+        // Row format preview — limit rows for memory safety
+        const previewWb = XLSX.readFile(req.file.path, { sheetRows: 500 });
+        const previewSheet = previewWb.Sheets[previewWb.SheetNames[0]];
+        const previewBuffer = XLSX.write(previewWb, { type: "buffer", bookType: "xlsx" });
         parseResult = await parseWithEnhancedConfig(
-          req.file.buffer,
+          previewBuffer,
           config,
           dataSourceId,
         );
