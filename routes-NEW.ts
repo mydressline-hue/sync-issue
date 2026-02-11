@@ -3,6 +3,9 @@ import { createServer, type Server } from "http";
 import multer from "multer";
 import * as XLSX from "xlsx";
 import crypto from "crypto";
+import fs from "fs";
+import os from "os";
+import path from "path";
 import { storage } from "./storage";
 import { db } from "./db";
 import { eq, and, count, desc } from "drizzle-orm";
@@ -360,8 +363,51 @@ export async function processUrlDataSourceImport(
   }
 }
 
-// Configure multer for file uploads (50MB limit to prevent OOM on large files)
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
+// Configure multer for file uploads — disk storage to avoid OOM from large files in RAM
+const uploadDir = path.join(os.tmpdir(), "uploads");
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+const _multer = multer({
+  storage: multer.diskStorage({
+    destination: uploadDir,
+    filename: (_req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
+  }),
+  limits: { fileSize: 50 * 1024 * 1024 },
+});
+
+// Middleware: lazily load file.buffer from disk so existing handlers work unchanged
+// Buffer is read on first access, then cached. Temp file is cleaned up when response finishes.
+function loadBufferFromDisk(req: any, _res: any, next: any) {
+  const patchFile = (file: any) => {
+    if (file && file.path && !file.buffer) {
+      let _buf: Buffer | null = null;
+      Object.defineProperty(file, "buffer", {
+        get() {
+          if (!_buf) _buf = fs.readFileSync(file.path);
+          return _buf;
+        },
+        configurable: true,
+      });
+    }
+  };
+  if (req.file) patchFile(req.file);
+  if (Array.isArray(req.files)) req.files.forEach(patchFile);
+  // Clean up temp files when response finishes
+  _res.on("finish", () => {
+    const files = req.file ? [req.file] : Array.isArray(req.files) ? req.files : [];
+    for (const f of files) {
+      if (f?.path) fs.unlink(f.path, () => {});
+    }
+  });
+  next();
+}
+
+// Wrap multer methods to auto-chain disk→buffer middleware
+const upload = {
+  single: (field: string) => [_multer.single(field), loadBufferFromDisk],
+  array: (field: string, maxCount?: number) => [_multer.array(field, maxCount), loadBufferFromDisk],
+  any: () => [_multer.any(), loadBufferFromDisk],
+  fields: (fields: any) => [_multer.fields(fields), loadBufferFromDisk],
+};
 
 // Helper function to detect and parse Tarik Ediz pivoted format
 function parseTarikEdizFormat(
@@ -3164,7 +3210,7 @@ export async function registerRoutes(
         // Only parse first 10 rows for detection to minimize memory usage
         let detectedFormat: string | null = null;
         {
-          const detectWorkbook = XLSX.read(file.buffer, { type: "buffer", sheetRows: 10 });
+          const detectWorkbook = XLSX.readFile(file.path, { sheetRows: 10 });
           const detectSheet = detectWorkbook.Sheets[detectWorkbook.SheetNames[0]];
           const sampleData = XLSX.utils.sheet_to_json(detectSheet, {
             header: 1,

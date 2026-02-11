@@ -17,6 +17,9 @@
 
 import { Router, Request, Response } from "express";
 import multer from "multer";
+import fs from "fs";
+import os from "os";
+import path from "path";
 import * as XLSX from "xlsx";
 import { storage } from "./storage";
 import { detectFileFormat } from "./aiFormatDetection";
@@ -51,7 +54,48 @@ import { executeImport } from "./importEngine";
 import { analyzeFileWithAI, parseGroupedPivotData, toEnhancedConfig } from "./universalParser";
 
 const router = Router();
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
+
+// Disk storage to avoid OOM from large files in RAM
+const aiUploadDir = path.join(os.tmpdir(), "ai-uploads");
+if (!fs.existsSync(aiUploadDir)) fs.mkdirSync(aiUploadDir, { recursive: true });
+const _multer = multer({
+  storage: multer.diskStorage({
+    destination: aiUploadDir,
+    filename: (_req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
+  }),
+  limits: { fileSize: 50 * 1024 * 1024 },
+});
+
+// Lazily load file.buffer from disk so existing handlers work unchanged
+function loadBufferFromDisk(req: any, _res: any, next: any) {
+  const patchFile = (file: any) => {
+    if (file && file.path && !file.buffer) {
+      let _buf: Buffer | null = null;
+      Object.defineProperty(file, "buffer", {
+        get() {
+          if (!_buf) _buf = fs.readFileSync(file.path);
+          return _buf;
+        },
+        configurable: true,
+      });
+    }
+  };
+  if (req.file) patchFile(req.file);
+  if (Array.isArray(req.files)) req.files.forEach(patchFile);
+  _res.on("finish", () => {
+    const files = req.file ? [req.file] : Array.isArray(req.files) ? req.files : [];
+    for (const f of files) {
+      if (f?.path) fs.unlink(f.path, () => {});
+    }
+  });
+  next();
+}
+
+const upload = {
+  single: (field: string) => [_multer.single(field), loadBufferFromDisk],
+  array: (field: string, maxCount?: number) => [_multer.array(field, maxCount), loadBufferFromDisk],
+  any: () => [_multer.any(), loadBufferFromDisk],
+};
 
 // ============================================================
 // TYPE DEFINITIONS
@@ -1625,9 +1669,8 @@ router.post("/analyze", upload.any(), async (req: Request, res: Response) => {
         `[AIImport] Consolidated ${rawData.length} total rows from ${files.length} files`,
       );
     } else {
-      // Parse only first 30 rows for detection — AI analysis only needs 25 sample rows
-      // This avoids loading huge spreadsheets entirely into memory for the /analyze endpoint
-      const workbook = XLSX.read(primaryFile.buffer, { type: "buffer", sheetRows: 30 });
+      // Read directly from disk with sheetRows limit — never loads full file into memory
+      const workbook = XLSX.readFile(primaryFile.path, { sheetRows: 30 });
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
       rawData = XLSX.utils.sheet_to_json(sheet, {
         header: 1,
@@ -1914,7 +1957,7 @@ router.post(
       let detectedPivotFormat: string | null = null;
       let sampleDataForGrouped: any[][] | null = null;
       {
-        const detectWb = XLSX.read(req.file.buffer, { type: "buffer", sheetRows: 10 });
+        const detectWb = XLSX.readFile(req.file.path, { sheetRows: 10 });
         const detectSheet = detectWb.Sheets[detectWb.SheetNames[0]];
         const sampleData = XLSX.utils.sheet_to_json(detectSheet, {
           header: 1,
