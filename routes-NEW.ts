@@ -15873,7 +15873,12 @@ export async function registerRoutes(
       const alertsDismissal = await storage.getDashboardDismissal("alerts");
 
       // Get data sources with sync status
-      const allDataSources = await storage.getDataSources();
+      // Strip heavy config fields immediately - dashboard only needs id/name/type/lastSync/connectionDetails
+      const allDataSourcesRaw = await storage.getDataSources();
+      const allDataSources = allDataSourcesRaw.map((s: any) => {
+        const { lastImportStats, cleaningConfig, validationConfig, expansionConfig, columnMapping, pivotConfig, ...light } = s;
+        return light;
+      });
       const dataSourcesWithStats = await Promise.all(
         allDataSources.map(async (ds) => {
           const lastSync = ds.lastSync ? new Date(ds.lastSync) : null;
