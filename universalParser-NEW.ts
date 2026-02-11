@@ -108,9 +108,11 @@ Key indicators of grouped pivot:
 
 ## IMPORTANT RULES
 1. Look for title rows at the top (company name, report title, date) — these are NOT data. Set headerRowIndex and dataStartRow AFTER these.
-2. Sizes in pivot/grouped formats are usually: 00, 0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24 OR XS, S, M, L, XL, XXL OR similar patterns.
+2. Sizes in pivot/grouped formats can be: 00, 0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32 OR plus/W sizes like 16W, 18W, 20W OR letter sizes like XS, S, M, L, XL, XXL OR any similar patterns. Include ALL size columns you find.
 3. If you see numeric column headers that look like dress sizes, it's likely a pivot format.
-4. Return ONLY valid JSON. No explanation text.
+4. For pivot formats, also look for date columns (ship date, available date, ETA, delivery date) and status/discontinued columns. Include them as "dateColumn" and "statusColumn" in pivotConfig.
+5. Always include "headerRowIndex" and "dataStartRow" in pivotConfig so the parser knows where headers and data begin.
+6. Return ONLY valid JSON. No explanation text.
 
 ## RESPONSE FORMAT
 
@@ -145,7 +147,11 @@ For "pivot" format:
     "styleColumn": "Style",
     "colorColumn": "Color",
     "sizeColumns": ["00", "0", "2", "4", "6", "8", "10", "12"],
-    "priceColumn": "Price"
+    "priceColumn": "Price",
+    "dateColumn": "Ship Date",
+    "statusColumn": "Status",
+    "headerRowIndex": 0,
+    "dataStartRow": 1
   },
   "notes": ["Pivot format with sizes as column headers"]
 }

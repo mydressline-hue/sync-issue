@@ -2294,7 +2294,14 @@ export async function registerRoutes(
   app.get("/api/data-sources", async (req, res) => {
     try {
       const sources = await storage.getDataSources();
-      res.json(sources);
+      // Strip heavy fields from list response to prevent memory crashes
+      // lastImportStats can contain huge per-style breakdowns (hundreds of KB per data source)
+      // Full stats are still available via GET /api/data-sources/:id
+      const lightweight = sources.map((s: any) => {
+        const { lastImportStats, ...rest } = s;
+        return rest;
+      });
+      res.json(lightweight);
     } catch (error) {
       console.error("Error fetching data sources:", error);
       res.status(500).json({ error: "Failed to fetch data sources" });
